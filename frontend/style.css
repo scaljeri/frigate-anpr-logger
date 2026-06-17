@@ -516,6 +516,43 @@ button {
   color: var(--plate-bg);
 }
 
+/* Plate + its inline edit affordance. The plate is the only editable field,
+   so the trigger lives right next to it instead of in the actions row. */
+.plate-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Pencil button shown beside the plate when idle. */
+.plate-edit-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-muted);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 80ms, border-color 80ms, color 80ms;
+}
+
+.plate-edit-icon:hover {
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.plate-edit-icon:active {
+  transform: translateY(1px);
+}
+
 /* ---------- horizontal spike timeline ---------- */
 
 .timeline-wrap {

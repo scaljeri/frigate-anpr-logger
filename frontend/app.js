@@ -958,10 +958,33 @@ async function renderDetail(plate) {
       }
     }
 
+    // The plate is the only editable thing, so the edit affordance lives right
+    // next to it: a pencil when idle, Save/Cancel while editing. The plate
+    // badge swaps to a text input in the same spot (see plateNode above).
+    const plateRow = h("div.plate-row", {}, plateNode);
+    if (busy) {
+      // Frozen mid-save; the busy text shows in the actions column.
+    } else if (editing) {
+      plateRow.appendChild(
+        h("button.detail-btn.primary", { type: "button", onClick: saveEdit }, "Save"),
+      );
+      plateRow.appendChild(
+        h("button.detail-btn", { type: "button", onClick: cancelEdit }, "Cancel"),
+      );
+    } else {
+      plateRow.appendChild(
+        h(
+          "button.plate-edit-icon",
+          { type: "button", title: "Edit plate", "aria-label": "Edit plate", onClick: startEdit },
+          "✎",
+        ),
+      );
+    }
+
     const metaCol = h(
       "div.meta",
       {},
-      plateNode,
+      plateRow,
       h("div.meta-title", {}, vehicleLabel(meta) || "Unknown vehicle"),
       h(
         "div.meta-line",
@@ -981,25 +1004,12 @@ async function renderDetail(plate) {
     );
     headerEl.appendChild(statCol);
 
+    // Plate-level actions (not editing — that affordance sits by the plate).
+    // Hidden while editing so the header stays focused on the plate input.
     const actionsCol = h("div.detail-actions");
     if (busy) {
       actionsCol.appendChild(h("span.detail-busy", {}, busy));
-    } else if (editing) {
-      actionsCol.appendChild(
-        h(
-          "button.detail-btn.primary",
-          { type: "button", onClick: saveEdit },
-          "Save",
-        ),
-      );
-      actionsCol.appendChild(
-        h(
-          "button.detail-btn",
-          { type: "button", onClick: cancelEdit },
-          "Cancel",
-        ),
-      );
-    } else {
+    } else if (!editing) {
       if (meta.frigate_event_id && APP_CONFIG.frigate_public_url) {
         actionsCol.appendChild(
           h(
@@ -1017,13 +1027,6 @@ async function renderDetail(plate) {
       if (providers.length) {
         actionsCol.appendChild(buildSyncDropdown(providers, syncWith));
       }
-      actionsCol.appendChild(
-        h(
-          "button.detail-btn",
-          { type: "button", title: "Edit plate", onClick: startEdit },
-          "✎ Edit",
-        ),
-      );
       actionsCol.appendChild(
         h(
           "button.detail-btn.danger",
