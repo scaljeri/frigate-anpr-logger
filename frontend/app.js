@@ -915,7 +915,9 @@ async function renderDetail(plate) {
     if (editing) {
       const input = h("input.plate-edit", {
         type: "text",
-        value: plate,
+        // Seed with the hyphenated form so the dashes don't vanish on edit;
+        // normalizePlateForBackend strips them again on save.
+        value: formatPlate(plate),
         spellcheck: false,
         autocomplete: "off",
         autocapitalize: "characters",
