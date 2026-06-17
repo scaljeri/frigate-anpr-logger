@@ -565,6 +565,10 @@ def on_message(client, userdata, msg):
         return
 
     plate = normalize_plate(raw_plate)
+    # Keep Frigate's own formatting (it already emits the canonical dashed
+    # plate, e.g. "GVF-57-G") so the dashboard can display that grouping
+    # verbatim. `plate` stays the separator-stripped key for everything else.
+    display_plate = raw_plate.strip().upper()
     event_id = after.get("id")
     camera = after.get("camera")
     # `sub_label` is Frigate's known-plate label, e.g. "Mieke Erwin" from
@@ -581,9 +585,10 @@ def on_message(client, userdata, msg):
 
     with db() as conn:
         conn.execute(
-            "INSERT INTO sightings(plate, seen_at, score, camera, name, frigate_event_id)"
-            " VALUES(?,?,?,?,?,?)",
-            (plate, seen_at, lpr_score, camera, name, event_id),
+            "INSERT INTO sightings"
+            "(plate, seen_at, score, camera, name, frigate_event_id, raw_plate)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (plate, seen_at, lpr_score, camera, name, event_id, display_plate),
         )
         conn.commit()
         log.info("Sighting: %s (LPR score %.2f, cam %s, name %r)",
@@ -773,7 +778,13 @@ def counts(
                      WHERE s2.plate = s.plate
                        AND s2.frigate_event_id IS NOT NULL
                      ORDER BY s2.seen_at DESC
-                     LIMIT 1)      AS frigate_event_id
+                     LIMIT 1)      AS frigate_event_id,
+                   (SELECT s3.raw_plate
+                      FROM sightings s3
+                     WHERE s3.plate = s.plate
+                       AND s3.raw_plate IS NOT NULL
+                     ORDER BY s3.seen_at DESC
+                     LIMIT 1)      AS display_plate
             FROM sightings s
             LEFT JOIN vehicles v ON v.plate = s.plate
             {where_sql}
@@ -840,7 +851,7 @@ _PATCH_COLUMNS = {"plate", "seen_at", "score", "camera", "name"}
 # enrichment. Kept as a single SQL string so the response shape stays in
 # sync across list/get/create/update.
 _SIGHTING_SELECT = """
-    SELECT s.id, s.plate, s.seen_at, s.score, s.camera, s.name,
+    SELECT s.id, s.plate, s.raw_plate, s.seen_at, s.score, s.camera, s.name,
            v.make, v.model, v.colour, v.year, v.provider
     FROM sightings s
     LEFT JOIN vehicles v ON v.plate = s.plate

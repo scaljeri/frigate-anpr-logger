@@ -95,11 +95,20 @@ async function fetchProviderConfig() {
   }
 }
 
-/** Apply the country-specific hyphenation a provider declared for this plate. */
-function formatPlate(plate) {
+/** Apply the country-specific hyphenation a provider declared for this plate.
+ *
+ * If `display` is given (the source's own formatting, e.g. Frigate's
+ * "GVF-57-G"), prefer it verbatim — but only when it represents the same plate,
+ * so a stale value can never mislabel a row. Otherwise fall back to the
+ * sidecode rules, then to the bare uppercased plate. */
+function formatPlate(plate, display) {
   if (!plate) return "";
   const clean = String(plate).replace(/[^A-Z0-9]/gi, "").toUpperCase();
   if (!clean) return plate;
+  if (display) {
+    const d = String(display).trim().toUpperCase();
+    if (d.replace(/[^A-Z0-9]/g, "") === clean) return d;
+  }
   for (const { re, parts } of _PLATE_FORMATTERS) {
     if (re.test(clean)) {
       return (
@@ -261,11 +270,11 @@ function appendChildren(el, children) {
   }
 }
 
-function plateBadge(plate, { large = false, small = false } = {}) {
+function plateBadge(plate, { large = false, small = false, display = null } = {}) {
   const cls = ["plate"];
   if (large) cls.push("plate-lg");
   if (small) cls.push("plate-sm");
-  return h(`span.${cls.join(".")}`, {}, formatPlate(plate));
+  return h(`span.${cls.join(".")}`, {}, formatPlate(plate, display));
 }
 
 function snapshotThumb(plate, { large = false } = {}) {
@@ -279,6 +288,39 @@ function snapshotThumb(plate, { large = false } = {}) {
 
 function clear(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
+}
+
+// ---- full-screen busy overlay -------------------------------------------
+//
+// A scrim that blurs the whole page and centres a spinner while a plate edit
+// does its server-side work: merging the plate into an existing one, or looking
+// a fresh plate up against the vehicle registry. Both round-trip through a
+// provider HTTP lookup, so we freeze the page rather than leave the header in a
+// half-edited state. One element, reused across calls; hideOverlay() fades it.
+let overlayEl = null;
+
+function showOverlay(message) {
+  if (!overlayEl) {
+    overlayEl = h(
+      "div.app-overlay",
+      { role: "status", "aria-live": "polite" },
+      h(
+        "div.app-overlay-card",
+        {},
+        h("div.spinner", { "aria-hidden": "true" }),
+        h("div.app-overlay-label"),
+      ),
+    );
+    document.body.appendChild(overlayEl);
+  }
+  overlayEl.querySelector(".app-overlay-label").textContent = message || "Working…";
+  // Reflow so the fade-in runs even when we add the class in the same tick.
+  void overlayEl.offsetWidth;
+  overlayEl.classList.add("is-visible");
+}
+
+function hideOverlay() {
+  if (overlayEl) overlayEl.classList.remove("is-visible");
 }
 
 function renderTemplate(id) {
@@ -358,7 +400,7 @@ const PLATE_COLUMNS = [
   { key: "snapshot", label: "Photo", defaultVisible: true, sortable: false,
     render: r => r.has_snapshot ? snapshotThumb(r.plate) : muted() },
   { key: "plate", label: "Plate", required: true, defaultVisible: true, defaultAsc: true,
-    render: r => plateBadge(r.plate) },
+    render: r => plateBadge(r.plate, { display: r.display_plate }) },
   { key: "make", label: "Vehicle", defaultVisible: true, defaultAsc: true,
     render: r => vehicleLabel(r) || muted() },
   { key: "colour", label: "Colour", defaultVisible: true, defaultAsc: true,
@@ -832,12 +874,15 @@ async function renderDetail(plate) {
       return;
     }
 
-    // If the target plate already exists, this rename merges into it. Confirm
-    // first so an accidental typo doesn't silently fold two cars together.
+    // Does the target plate already exist? The answer drives two things: a
+    // merge confirmation (so a typo doesn't silently fold two cars together),
+    // and the busy-overlay wording — "Merging…" vs "Looking up…".
+    let willMerge = false;
     try {
       const existing = await apiGet(`/counts?plate=${encodeURIComponent(newPlate)}`);
       const target = existing.items && existing.items[0];
       if (target && target.count > 0) {
+        willMerge = true;
         const n = passages.length;
         const ok = window.confirm(
           `${formatPlate(newPlate)} already exists with ${target.count} ` +
@@ -851,16 +896,24 @@ async function renderDetail(plate) {
       // rename call itself surface any real error.
     }
 
-    busy = "Saving…";
-    renderHeader();
+    // Freeze the page behind a blurred overlay while the server does the magic
+    // in one atomic call: move every passage onto the new plate, drop the
+    // orphaned source row, carry the snapshot, and (re)fetch the destination's
+    // vehicle data. renderDetail() lifts the overlay once the redirected-to
+    // plate has painted.
+    editing = false;
+    showOverlay(
+      willMerge
+        ? `Merging into ${formatPlate(newPlate)}…`
+        : `Looking up ${formatPlate(newPlate)}…`,
+    );
     try {
       await apiPost(`/plates/${encodeURIComponent(plate)}/rename`, { to: newPlate });
       // Navigate to the new plate's detail (re-renders against fresh server state).
       location.hash = `#/plate/${encodeURIComponent(newPlate)}`;
     } catch (e) {
+      hideOverlay();
       alert(`Failed to update plate: ${e.message}`);
-      busy = null;
-      editing = false;
       renderHeader();
     }
   }
@@ -915,9 +968,9 @@ async function renderDetail(plate) {
     if (editing) {
       const input = h("input.plate-edit", {
         type: "text",
-        // Seed with the hyphenated form so the dashes don't vanish on edit;
-        // normalizePlateForBackend strips them again on save.
-        value: formatPlate(plate),
+        // Seed with the displayed (dashed) form so the dashes don't vanish on
+        // edit; normalizePlateForBackend strips them again on save.
+        value: formatPlate(plate, meta.display_plate),
         spellcheck: false,
         autocomplete: "off",
         autocapitalize: "characters",
@@ -937,7 +990,7 @@ async function renderDetail(plate) {
       plateNode = input;
     } else {
       editInputRef = null;
-      plateNode = plateBadge(plate, { large: true });
+      plateNode = plateBadge(plate, { large: true, display: meta.display_plate });
     }
 
     if (meta.has_snapshot) {
@@ -1106,6 +1159,11 @@ async function renderDetail(plate) {
   }
   table.appendChild(tbody);
   timelineEl.appendChild(table);
+
+  // The detail view has fully painted. If we got here via a plate-edit redirect
+  // (merge or fresh lookup), lift the busy overlay now — not before, so the
+  // blur stays up until the new plate is actually on screen. No-op otherwise.
+  hideOverlay();
 }
 
 async function renderSightings() {
@@ -1151,7 +1209,7 @@ async function renderSightings() {
         "a.sighting-row",
         { href: `#/plate/${encodeURIComponent(s.plate)}` },
         h("span.sighting-time", {}, fmtTime.format(new Date(s.seen_at))),
-        plateBadge(s.plate, { small: true }),
+        plateBadge(s.plate, { small: true, display: s.raw_plate }),
         h(
           "span.sighting-meta",
           {},

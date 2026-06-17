@@ -105,10 +105,26 @@ def _m3_sighting_frigate_event_id(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE sightings ADD COLUMN frigate_event_id TEXT")
 
 
+def _m4_sighting_raw_plate(conn: sqlite3.Connection) -> None:
+    """Persist the plate string exactly as the source delivered it.
+
+    Frigate's LPR already emits the canonical dashed form (e.g. ``"GVF-57-G"``),
+    which we otherwise throw away in ``normalize_plate``. Keeping it lets the
+    dashboard show that grouping verbatim instead of re-deriving dashes from the
+    sidecode rules — which matters for foreign plates and OCR mis-groupings the
+    sidecodes don't match. Nullable: existing rows and sources without a raw
+    form (manual POST, healing) stay NULL and fall back to sidecode formatting.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(sightings)")}
+    if "raw_plate" not in existing:
+        conn.execute("ALTER TABLE sightings ADD COLUMN raw_plate TEXT")
+
+
 MIGRATIONS: list[tuple[int, str, callable]] = [
     (1, "initial schema (sightings + vehicles + indexes)", _m1_initial_schema),
     (2, "extra RDW vehicle fields (price, recall, dimensions, …)", _m2_extra_vehicle_fields),
     (3, "sighting frigate event id", _m3_sighting_frigate_event_id),
+    (4, "sighting raw (source-formatted) plate for display", _m4_sighting_raw_plate),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 0

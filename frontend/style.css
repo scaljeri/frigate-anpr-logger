@@ -1208,3 +1208,76 @@ button {
     padding: 12px;
   }
 }
+
+/* ---------- busy overlay (plate-edit magic) ---------- */
+/*
+ * A modal scrim that blurs the whole page and centres a spinner while a plate
+ * edit does its server-side work — merging into an existing plate, or looking a
+ * fresh plate up against the registry. The blur is the overlay's own
+ * backdrop-filter, so it dims and softens everything behind it without touching
+ * the page markup.
+ */
+
+.app-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(13, 16, 21, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.18s ease, visibility 0.18s ease;
+}
+
+.app-overlay.is-visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.app-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 28px 38px;
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.spinner {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin 0.7s linear infinite;
+}
+
+.app-overlay-label {
+  font-size: 14px;
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 1.6s;
+  }
+  .app-overlay {
+    transition: none;
+  }
+}
