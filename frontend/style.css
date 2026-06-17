@@ -517,7 +517,7 @@ button {
 }
 
 /* Plate + its inline edit affordance. The plate is the only editable field,
-   so the trigger lives right next to it instead of in the actions row. */
+   so it doubles as the edit trigger: the whole row is the click target. */
 .plate-row {
   display: flex;
   align-items: center;
@@ -525,32 +525,34 @@ button {
   flex-wrap: wrap;
 }
 
-/* Pencil button shown beside the plate when idle. */
+.plate-row.editable {
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.plate-row.editable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Pencil hint, hidden until the plate is hovered/focused — signals that the
+   plate is click-to-edit without cluttering the header at rest. */
 .plate-edit-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
+  width: 24px;
+  height: 24px;
   font-size: 14px;
   line-height: 1;
   color: var(--text-muted);
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border-soft);
-  border-radius: 5px;
-  cursor: pointer;
-  transition: background-color 80ms, border-color 80ms, color 80ms;
+  opacity: 0;
+  transition: opacity 100ms;
 }
 
-.plate-edit-icon:hover {
-  background: var(--bg);
-  border-color: var(--border);
-  color: var(--text);
-}
-
-.plate-edit-icon:active {
-  transform: translateY(1px);
+.plate-row.editable:hover .plate-edit-icon,
+.plate-row.editable:focus-visible .plate-edit-icon {
+  opacity: 1;
 }
 
 /* ---------- horizontal spike timeline ---------- */

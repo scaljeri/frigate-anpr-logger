@@ -972,13 +972,21 @@ async function renderDetail(plate) {
         h("button.detail-btn", { type: "button", onClick: cancelEdit }, "Cancel"),
       );
     } else {
-      plateRow.appendChild(
-        h(
-          "button.plate-edit-icon",
-          { type: "button", title: "Edit plate", "aria-label": "Edit plate", onClick: startEdit },
-          "✎",
-        ),
-      );
+      // The plate itself is the click target: hovering (or focusing) reveals a
+      // pencil hint and a pointer cursor so it reads as click-to-edit.
+      plateRow.classList.add("editable");
+      plateRow.setAttribute("role", "button");
+      plateRow.setAttribute("tabindex", "0");
+      plateRow.setAttribute("title", "Edit plate");
+      plateRow.setAttribute("aria-label", `Edit plate ${formatPlate(plate)}`);
+      plateRow.addEventListener("click", startEdit);
+      plateRow.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          startEdit();
+        }
+      });
+      plateRow.appendChild(h("span.plate-edit-icon", { "aria-hidden": "true" }, "✎"));
     }
 
     const metaCol = h(
