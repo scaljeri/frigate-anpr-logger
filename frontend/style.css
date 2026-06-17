@@ -525,8 +525,8 @@ button {
   flex-wrap: wrap;
 }
 
-/* The detail-header plate badge doubles as the edit button: a pencil sits
-   inside it and the whole badge highlights on hover/focus. */
+/* The detail-header plate badge doubles as the edit button: a pointer cursor
+   plus a highlight on hover/focus signal it's click-to-edit. */
 .plate.plate-editable {
   cursor: pointer;
   transition: box-shadow 100ms, filter 100ms;
@@ -539,21 +539,6 @@ button {
     inset 0 -2px 0 rgba(0, 0, 0, 0.18),
     0 0 0 3px var(--accent);
   outline: none;
-}
-
-/* Pencil glyph living inside the plate. Subtle at rest, brighter on hover. */
-.plate-edit-icon {
-  margin-left: 0.35em;
-  font-size: 0.5em;
-  line-height: 1;
-  color: var(--plate-fg);
-  opacity: 0.5;
-  transition: opacity 100ms;
-}
-
-.plate.plate-editable:hover .plate-edit-icon,
-.plate.plate-editable:focus-visible .plate-edit-icon {
-  opacity: 0.9;
 }
 
 /* ---------- horizontal spike timeline ---------- */

@@ -972,9 +972,8 @@ async function renderDetail(plate) {
         h("button.detail-btn", { type: "button", onClick: cancelEdit }, "Cancel"),
       );
     } else {
-      // The plate badge itself is the click target: a pencil sits inside the
-      // badge and the whole plate highlights on hover/focus, so it reads as
-      // click-to-edit.
+      // The plate badge itself is the click target: it highlights on
+      // hover/focus and shows a pointer cursor, so it reads as click-to-edit.
       plateNode.classList.add("plate-editable");
       plateNode.setAttribute("role", "button");
       plateNode.setAttribute("tabindex", "0");
@@ -987,7 +986,6 @@ async function renderDetail(plate) {
           startEdit();
         }
       });
-      plateNode.appendChild(h("span.plate-edit-icon", { "aria-hidden": "true" }, "✎"));
     }
 
     const metaCol = h(
