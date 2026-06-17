@@ -517,7 +517,7 @@ button {
 }
 
 /* Plate + its inline edit affordance. The plate is the only editable field,
-   so it doubles as the edit trigger: the whole row is the click target. */
+   so the badge itself is the edit trigger (see .plate-editable below). */
 .plate-row {
   display: flex;
   align-items: center;
@@ -525,34 +525,35 @@ button {
   flex-wrap: wrap;
 }
 
-.plate-row.editable {
+/* The detail-header plate badge doubles as the edit button: a pencil sits
+   inside it and the whole badge highlights on hover/focus. */
+.plate.plate-editable {
   cursor: pointer;
-  border-radius: 6px;
+  transition: box-shadow 100ms, filter 100ms;
 }
 
-.plate-row.editable:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
+.plate.plate-editable:hover,
+.plate.plate-editable:focus-visible {
+  filter: brightness(1.06);
+  box-shadow:
+    inset 0 -2px 0 rgba(0, 0, 0, 0.18),
+    0 0 0 3px var(--accent);
+  outline: none;
 }
 
-/* Pencil hint, hidden until the plate is hovered/focused — signals that the
-   plate is click-to-edit without cluttering the header at rest. */
+/* Pencil glyph living inside the plate. Subtle at rest, brighter on hover. */
 .plate-edit-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  font-size: 14px;
+  margin-left: 0.35em;
+  font-size: 0.5em;
   line-height: 1;
-  color: var(--text-muted);
-  opacity: 0;
+  color: var(--plate-fg);
+  opacity: 0.5;
   transition: opacity 100ms;
 }
 
-.plate-row.editable:hover .plate-edit-icon,
-.plate-row.editable:focus-visible .plate-edit-icon {
-  opacity: 1;
+.plate.plate-editable:hover .plate-edit-icon,
+.plate.plate-editable:focus-visible .plate-edit-icon {
+  opacity: 0.9;
 }
 
 /* ---------- horizontal spike timeline ---------- */
