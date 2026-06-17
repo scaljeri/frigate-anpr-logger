@@ -112,6 +112,7 @@ instance for the full OpenAPI shape.
 | `POST /sightings`                     | Manual insert. Triggers a provider lookup for new plates. 201.     |
 | `PATCH /sightings/{id}`               | Partial update; plate change re-runs the provider lookup.          |
 | `DELETE /sightings/{id}`              | Remove a sighting (false positive).                                |
+| `POST /plates/{plate}/rename`         | Rename a plate across all its sightings; merges into the target if it already exists, re-syncs vehicle data, carries the snapshot. Body `{"to": "<plate>"}`. |
 | `GET /vehicles/{plate}`               | Stored vehicle row.                                                |
 | `POST /vehicles/{plate}/refresh`      | Force a fresh provider lookup.                                     |
 | `DELETE /vehicles/{plate}`            | Delete a cached vehicle row.                                       |

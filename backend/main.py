@@ -496,6 +496,27 @@ def maybe_fetch_snapshot(plate: str, event_id: str) -> None:
         log.warning("Snapshot fetch failed for %s via %s: %s", plate, url, e)
 
 
+def migrate_snapshot(src_plate: str, dst_plate: str) -> None:
+    """Move the cached snapshot from ``src_plate`` to ``dst_plate`` on a rename.
+
+    So a corrected plate keeps its photo. If the destination already has a
+    snapshot (renaming *into* an existing plate — i.e. a merge), the
+    destination's image wins and the source file is discarded as an orphan.
+    Best-effort: filesystem errors are logged, never raised.
+    """
+    src = _snapshot_path(src_plate)
+    dst = _snapshot_path(dst_plate)
+    if not src.exists():
+        return
+    try:
+        if dst.exists():
+            src.unlink()
+        else:
+            src.replace(dst)  # atomic rename within the same directory
+    except OSError as e:
+        log.warning("Snapshot move %s -> %s failed: %s", src, dst, e)
+
+
 # ---------------------------------------------------------------------------
 # MQTT listener (runs in a background thread)
 # ---------------------------------------------------------------------------
@@ -955,6 +976,68 @@ def delete_sighting(sighting_id: int):
         conn.execute("DELETE FROM sightings WHERE id = ?", (sighting_id,))
         conn.commit()
     return Response(status_code=204)
+
+
+# ----- plates (bulk rename / merge) --------------------------------------
+
+class PlateRename(BaseModel):
+    to: str
+
+
+@app.post("/plates/{plate}/rename")
+def rename_plate(plate: str, body: PlateRename):
+    """Rename a plate across *all* its sightings, merging into the target if it
+    already exists.
+
+    The bulk counterpart to ``PATCH /sightings/{id}`` (which retargets a single
+    sighting). The dashboard's "Edit plate" action calls this so a correction
+    is one atomic request instead of N per-sighting PATCHes. In one shot it:
+
+    - moves every sighting from ``plate`` to ``to`` (a single UPDATE; if ``to``
+      already has sightings they now share a timeline — that's the merge),
+    - drops the source's now-orphaned ``vehicles`` row,
+    - lets the cached Frigate snapshot follow the plate,
+    - re-fetches the destination's vehicle data once from the registry
+      (``force=True``) — the "sync with providers" step.
+
+    The sighting move + orphan cleanup run in one transaction so a crash can't
+    leave a half-renamed plate. Response: ``{plate, moved, merged}`` where
+    ``merged`` reports whether the destination already existed.
+    """
+    src = normalize_plate(plate)
+    dst = normalize_plate(body.to)
+    if not dst:
+        raise HTTPException(status_code=400, detail="target plate may not be empty")
+
+    with db() as conn:
+        moved = conn.execute(
+            "SELECT COUNT(*) FROM sightings WHERE plate = ?", (src,)
+        ).fetchone()[0]
+        if moved == 0:
+            raise HTTPException(status_code=404, detail="no sightings for this plate")
+
+        if src == dst:
+            # Normalises to the same plate (e.g. only hyphenation changed) —
+            # nothing to move. Report a consistent, no-op shape.
+            return {"plate": dst, "moved": 0, "merged": False}
+
+        merged = conn.execute(
+            "SELECT 1 FROM sightings WHERE plate = ? LIMIT 1", (dst,)
+        ).fetchone() is not None
+
+        conn.execute("UPDATE sightings SET plate = ? WHERE plate = ?", (dst, src))
+        conn.execute("DELETE FROM vehicles WHERE plate = ?", (src,))
+        conn.commit()
+
+        # Snapshot follows the plate (no-op when the target already had one).
+        migrate_snapshot(src, dst)
+
+        # One authoritative registry lookup for the destination, replacing any
+        # stale/empty cached row.
+        ensure_vehicle(conn, dst, force=True)
+
+    log.info("Renamed plate %s -> %s (%d sightings, merged=%s)", src, dst, moved, merged)
+    return {"plate": dst, "moved": moved, "merged": merged}
 
 
 # ----- vehicles -----------------------------------------------------------

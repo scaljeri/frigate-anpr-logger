@@ -296,16 +296,6 @@ async function apiGet(path) {
   return resp.json();
 }
 
-async function apiPatch(path, body) {
-  const resp = await fetch(path, {
-    method: "PATCH",
-    headers: { "content-type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-  return resp.json();
-}
-
 async function apiDelete(path, { ignore404 = false } = {}) {
   const resp = await fetch(path, { method: "DELETE" });
   if (!resp.ok && !(ignore404 && resp.status === 404)) {
@@ -811,10 +801,11 @@ async function renderDetail(plate) {
 
   // ---- editable header state ----
   //
-  // Edit and delete both fan out across every sighting in `passages`. The
-  // backend doesn't have a bulk "rename plate" or "delete plate" endpoint,
-  // so we batch PATCH/DELETE per sighting — fine for the typical 1-50
-  // sightings per plate.
+  // Edit renames the whole plate in one atomic call to POST
+  // /plates/<plate>/rename (moves every sighting, refreshes vehicle data,
+  // carries the snapshot, merges into the target if it already exists).
+  // Delete has no bulk endpoint, so it still fans out a DELETE per sighting —
+  // fine for the typical 1-50 sightings per plate.
 
   let editing = false;
   let busy = null;
@@ -840,15 +831,31 @@ async function renderDetail(plate) {
       cancelEdit();
       return;
     }
+
+    // If the target plate already exists, this rename merges into it. Confirm
+    // first so an accidental typo doesn't silently fold two cars together.
+    try {
+      const existing = await apiGet(`/counts?plate=${encodeURIComponent(newPlate)}`);
+      const target = existing.items && existing.items[0];
+      if (target && target.count > 0) {
+        const n = passages.length;
+        const ok = window.confirm(
+          `${formatPlate(newPlate)} already exists with ${target.count} ` +
+            `passage${target.count === 1 ? "" : "s"}.\n\n` +
+            `Merge this plate's ${n} passage${n === 1 ? "" : "s"} into it?`,
+        );
+        if (!ok) return;
+      }
+    } catch {
+      // Existence check failed (network/parse) — fall through and let the
+      // rename call itself surface any real error.
+    }
+
     busy = "Saving…";
     renderHeader();
     try {
-      await Promise.all(
-        passages.map((p) =>
-          apiPatch(`/sightings/${p.id}`, { plate: newPlate }),
-        ),
-      );
-      // Navigate to the new plate's detail (re-renders against the fresh server state).
+      await apiPost(`/plates/${encodeURIComponent(plate)}/rename`, { to: newPlate });
+      // Navigate to the new plate's detail (re-renders against fresh server state).
       location.hash = `#/plate/${encodeURIComponent(newPlate)}`;
     } catch (e) {
       alert(`Failed to update plate: ${e.message}`);
