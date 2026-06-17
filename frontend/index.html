@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0d1015" />
+    <title>Frigate ANPR Logger</title>
+    <link rel="stylesheet" href="style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23facc15'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='14' font-weight='700' text-anchor='middle' fill='%23111'%3EAN%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#/" aria-label="Frigate ANPR Logger">
+        <span class="brand-plate">NL</span>
+        <span class="brand-text">
+          <span class="brand-title">Frigate ANPR Logger</span>
+          <span class="brand-sub">Frigate &middot; ANPR</span>
+        </span>
+      </a>
+      <nav class="tabs" role="tablist">
+        <a href="#/" class="tab" data-view="plates" role="tab">Plates</a>
+        <a href="#/sightings" class="tab" data-view="sightings" role="tab">Passages</a>
+      </nav>
+    </header>
+
+    <main id="main" class="main" aria-live="polite"></main>
+
+    <footer class="footer">
+      <a href="/docs" rel="noopener">API docs</a>
+      <span class="dot">&middot;</span>
+      <a href="/providers" rel="noopener">Providers</a>
+      <span class="dot">&middot;</span>
+      <span id="footer-status">connecting&hellip;</span>
+    </footer>
+
+    <template id="tpl-plates">
+      <section class="view">
+        <div class="toolbar">
+          <label class="search">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2" />
+              <path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+            <input
+              id="search"
+              type="search"
+              placeholder="Search by plate, make or model&hellip;"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <div class="toolbar-meta" id="plates-meta"></div>
+        </div>
+        <div id="plates-list" class="list-wrap"></div>
+      </section>
+    </template>
+
+    <template id="tpl-detail">
+      <section class="view view-detail">
+        <a href="#/" class="back-link">&larr; Back to list</a>
+        <div id="detail-header" class="detail-header"></div>
+        <div id="detail-vehicle" class="detail-vehicle"></div>
+        <div id="detail-spikes" class="timeline-wrap"></div>
+        <div id="detail-timeline" class="list-wrap"></div>
+      </section>
+    </template>
+
+    <template id="tpl-sightings">
+      <section class="view">
+        <div class="toolbar">
+          <h2 class="view-title">Recent passages</h2>
+          <div class="toolbar-meta" id="sightings-meta"></div>
+        </div>
+        <div id="sightings-list" class="list-wrap"></div>
+      </section>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>

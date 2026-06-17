@@ -1,0 +1,24 @@
+services:
+  frigate-anpr-logger:
+    build: .
+    image: frigate-anpr-logger:latest
+    container_name: frigate-anpr-logger
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./data:/data
+      # Optional: mount your own provider configs (or let the container seed
+      # the host dir on first start from /app/providers_default/).
+      - ./providers:/app/providers
+    environment:
+      DB_PATH: /data/anpr.db
+      MQTT_HOST: ${MQTT_HOST:?set MQTT_HOST in .env or environment}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USER: ${MQTT_USER:-}
+      MQTT_PASS: ${MQTT_PASS:-}
+      FRIGATE_TOPIC: ${FRIGATE_TOPIC:-frigate/events}
+      MIN_SCORE: ${MIN_SCORE:-0.8}
+      PAGE_SIZE: ${PAGE_SIZE:-50}
+      FRIGATE_URL: ${FRIGATE_URL:-}
+      FRIGATE_PUBLIC_URL: ${FRIGATE_PUBLIC_URL:-}

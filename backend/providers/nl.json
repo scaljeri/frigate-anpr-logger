@@ -1,0 +1,60 @@
+{
+  "name": "nl",
+  "description": "Dutch RDW open data (opendata.rdw.nl)",
+  "plate_match": "^[A-Z0-9]{6}$",
+  "display": {
+    "yes_values":  ["Ja"],
+    "no_values":   ["Nee"],
+    "currency":    "EUR"
+  },
+  "plate_format": {
+    "sidecodes": [
+      { "pattern": "^[A-Z]{2}\\d{2}\\d{2}$",     "parts": [2, 4] },
+      { "pattern": "^\\d{2}\\d{2}[A-Z]{2}$",     "parts": [2, 4] },
+      { "pattern": "^\\d{2}[A-Z]{2}\\d{2}$",     "parts": [2, 4] },
+      { "pattern": "^[A-Z]{2}\\d{2}[A-Z]{2}$",   "parts": [2, 4] },
+      { "pattern": "^[A-Z]{2}[A-Z]{2}\\d{2}$",   "parts": [2, 4] },
+      { "pattern": "^\\d{2}[A-Z]{2}[A-Z]{2}$",   "parts": [2, 4] },
+      { "pattern": "^\\d{2}[A-Z]{3}\\d$",        "parts": [2, 5] },
+      { "pattern": "^\\d[A-Z]{3}\\d{2}$",        "parts": [1, 4] },
+      { "pattern": "^[A-Z]{2}\\d{3}[A-Z]$",      "parts": [2, 5] },
+      { "pattern": "^[A-Z]\\d{3}[A-Z]{2}$",      "parts": [1, 4] },
+      { "pattern": "^[A-Z]{3}\\d{2}[A-Z]$",      "parts": [3, 5] }
+    ]
+  },
+  "request": {
+    "method": "GET",
+    "url": "https://opendata.rdw.nl/resource/m9d7-ebf2.json",
+    "query": { "kenteken": "{plate}" },
+    "headers": {},
+    "body": null,
+    "timeout_seconds": 10
+  },
+  "response": {
+    "root": "[0]",
+    "fields": {
+      "make":             { "path": "merk" },
+      "model":            { "path": "handelsbenaming" },
+      "colour":           { "path": "eerste_kleur" },
+      "body_type":        { "path": "voertuigsoort" },
+      "year":             { "path": "datum_eerste_toelating", "slice": [0, 4] },
+      "fuel":             { "path": null },
+      "inspection_due":   { "path": "vervaldatum_apk" },
+      "catalog_price":    { "path": "catalogusprijs" },
+      "insured":          { "path": "wam_verzekerd" },
+      "recall_open":      { "path": "openstaande_terugroepactie_indicator" },
+      "is_taxi":          { "path": "taxi_indicator" },
+      "body_style":       { "path": "inrichting" },
+      "owner_since":      { "path": "datum_tenaamstelling" },
+      "efficiency_label": { "path": "zuinigheidslabel" },
+      "colour_secondary": { "path": "tweede_kleur" },
+      "engine_cc":        { "path": "cilinderinhoud" },
+      "seats":            { "path": "aantal_zitplaatsen" },
+      "doors":            { "path": "aantal_deuren" },
+      "mass_kg":          { "path": "massa_rijklaar" },
+      "power_to_weight":  { "path": "vermogen_massarijklaar" },
+      "length_cm":        { "path": "lengte" },
+      "width_cm":         { "path": "breedte" }
+    }
+  }
+}
