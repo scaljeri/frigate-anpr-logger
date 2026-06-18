@@ -926,17 +926,47 @@ def _fetch_sighting(conn, sighting_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def _parse_range_bound(raw: str, field: str) -> str:
+    """Parse a client ISO timestamp into the stored UTC-ISO comparison format.
+
+    Round-tripping through ``_iso_utc`` guarantees the comparison string uses the
+    same offset representation as the rows (``+00:00``), so SQLite's lexical
+    string comparison stays chronologically correct. A trailing ``Z`` (what
+    ``Date.toISOString()`` emits) is normalised since ``fromisoformat`` rejects
+    it on older Pythons. Bad input is a client error, not a 500.
+    """
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"invalid {field} timestamp")
+    return _iso_utc(dt)
+
+
 @app.get("/sightings")
 def list_sightings(
-    limit: int = Query(default=200, ge=1, le=1000),
+    limit: int = Query(default=200, ge=1, le=5000),
     plate: str | None = Query(default=None),
+    from_: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
 ):
-    """Flat list joined with vehicle info, newest first."""
-    where = ""
+    """Flat list joined with vehicle info, newest first.
+
+    Optional ``from``/``to`` ISO timestamps bound the result to a time window
+    (used by the all-vehicles timeline view); omit both for the original
+    newest-first behavior. The ``idx_sightings_seen`` index backs the range.
+    """
+    conditions: list[str] = []
     args: list = []
     if plate:
-        where = "WHERE s.plate = ?"
+        conditions.append("s.plate = ?")
         args.append(normalize_plate(plate))
+    if from_:
+        conditions.append("s.seen_at >= ?")
+        args.append(_parse_range_bound(from_, "from"))
+    if to:
+        conditions.append("s.seen_at <= ?")
+        args.append(_parse_range_bound(to, "to"))
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     args.append(limit)
     sql = f"{_SIGHTING_SELECT} {where} ORDER BY s.seen_at DESC LIMIT ?"
     with db() as conn:

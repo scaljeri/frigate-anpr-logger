@@ -1166,8 +1166,30 @@ async function renderDetail(plate) {
   hideOverlay();
 }
 
-async function renderSightings() {
+async function renderSightings(subview = "list") {
   renderTemplate("tpl-sightings");
+
+  // Wire the List | Timeline sub-tabs and reflect the active one. Each toggle
+  // just sets the hash; route() re-renders with the chosen sub-view.
+  for (const btn of document.querySelectorAll("#main [data-subview]")) {
+    const view = btn.dataset.subview;
+    btn.classList.toggle("active", view === subview);
+    btn.addEventListener("click", () => {
+      location.hash =
+        view === "timeline" ? "#/sightings?view=timeline" : "#/sightings";
+    });
+  }
+
+  const listEl = document.getElementById("sightings-list");
+  const tlEl = document.getElementById("sightings-timeline");
+  listEl.hidden = subview === "timeline";
+  tlEl.hidden = subview !== "timeline";
+
+  if (subview === "timeline") return renderSightingsTimeline();
+  return renderSightingsList();
+}
+
+async function renderSightingsList() {
   const listEl = document.getElementById("sightings-list");
   const metaEl = document.getElementById("sightings-meta");
 
@@ -1223,6 +1245,63 @@ async function renderSightings() {
     }
     listEl.appendChild(section);
   }
+}
+
+// All-vehicles timeline: every passage in the current week on one combined
+// axis. Reuses mountTimeline with a week window, pan enabled, a plate-aware
+// tooltip, and click-to-navigate to the plate detail page.
+async function renderSightingsTimeline() {
+  const wrap = document.getElementById("sightings-timeline");
+  const metaEl = document.getElementById("sightings-meta");
+
+  wrap.appendChild(h("div.status", {}, "Loading…"));
+
+  const now = Date.now();
+  const start = now - 7 * 24 * 60 * 60 * 1000; // current week: now-7d .. now
+  const LIMIT = 5000;
+
+  let sightings;
+  try {
+    sightings = await apiGet(
+      `/sightings?from=${encodeURIComponent(new Date(start).toISOString())}` +
+        `&to=${encodeURIComponent(new Date(now).toISOString())}&limit=${LIMIT}`,
+    );
+  } catch (e) {
+    clear(wrap);
+    wrap.appendChild(
+      h("div.status.error", {}, `Failed to fetch /sightings: ${e.message}`),
+    );
+    return;
+  }
+
+  clear(wrap);
+
+  const capped = sightings.length >= LIMIT;
+  metaEl.textContent = `${sightings.length}${capped ? "+" : ""} passage${
+    sightings.length === 1 ? "" : "s"
+  } this week`;
+
+  mountTimeline(wrap, sightings, {
+    initialStart: start,
+    initialEnd: now,
+    enablePan: true,
+    formatTooltip: (pt) => {
+      const r = pt.row;
+      const parts = [
+        formatPlate(r.plate, r.raw_plate),
+        fmtDateTime.format(new Date(pt.ts)),
+      ];
+      if (r.camera) parts.push(r.camera);
+      const desc = [vehicleLabel(r), r.colour ? titleCase(r.colour) : null]
+        .filter(Boolean)
+        .join(" · ");
+      if (desc) parts.push(desc);
+      return parts.join("  ·  ");
+    },
+    onClick: (r) => {
+      location.hash = "#/plate/" + encodeURIComponent(r.plate);
+    },
+  });
 }
 
 // ---------- horizontal spike timeline ----------------------------------
@@ -1397,7 +1476,7 @@ function generateTicks(viewStart, viewEnd, interval) {
   return out;
 }
 
-function mountTimeline(container, passages) {
+function mountTimeline(container, passages, opts = {}) {
   clear(container);
 
   const data = (passages || [])
@@ -1405,27 +1484,37 @@ function mountTimeline(container, passages) {
       ts: Date.parse(p.seen_at),
       score: typeof p.score === "number" ? p.score : null,
       camera: p.camera || null,
+      row: p, // source row, for richer tooltip / click navigation
     }))
     .filter((d) => Number.isFinite(d.ts))
     .sort((a, b) => a.ts - b.ts);
 
-  if (!data.length) {
+  // A caller-supplied window (e.g. the all-vehicles week view) lets us render an
+  // axis even with no points; without one, an empty dataset has nothing to show.
+  const hasWindow = opts.initialStart != null && opts.initialEnd != null;
+  if (!data.length && !hasWindow) {
     container.appendChild(h("div.status", {}, "No timestamps to show."));
     return;
   }
 
-  const firstTs = data[0].ts;
-  const lastTs = data[data.length - 1].ts;
+  // Data extent (falls back to the requested window when there are no points).
+  const firstTs = data.length ? data[0].ts : opts.initialStart;
+  const lastTs = data.length ? data[data.length - 1].ts : opts.initialEnd;
   // Minimum data span for sensible default view (e.g. one sighting only).
   const dataSpan = Math.max(lastTs - firstTs, 10 * TIMELINE_MIN_SPAN_MS);
   const initialPad = Math.max(dataSpan * 0.05, 5 * TIMELINE_MIN_SPAN_MS);
-  const initialStart = firstTs - initialPad;
-  const initialEnd = lastTs + initialPad;
+  const initialStart = opts.initialStart ?? firstTs - initialPad;
+  const initialEnd = opts.initialEnd ?? lastTs + initialPad;
 
-  // Absolute bounds: don't let the user pan/zoom infinitely off-data.
-  const absoluteMin = firstTs - dataSpan * 4;
-  const absoluteMax = lastTs + dataSpan * 4;
-  const maxViewSpan = Math.max(dataSpan * 8, 365 * 24 * 60 * 60_000);
+  // Absolute bounds: don't let the user pan/zoom infinitely off-data. Widen to
+  // also cover the requested window, so the clamp can't snap a sparse week view
+  // back onto a tight data cluster.
+  const lo = Math.min(firstTs, initialStart);
+  const hi = Math.max(lastTs, initialEnd);
+  const boundSpan = Math.max(hi - lo, dataSpan);
+  const absoluteMin = lo - boundSpan * 4;
+  const absoluteMax = hi + boundSpan * 4;
+  const maxViewSpan = Math.max(boundSpan * 8, 365 * 24 * 60 * 60_000);
 
   let viewStart = initialStart;
   let viewEnd = initialEnd;
@@ -1485,6 +1574,8 @@ function mountTimeline(container, passages) {
     {},
     h("span", {}, h("kbd", {}, "drag"), " select range"),
     h("span", {}, h("kbd", {}, "scroll"), " zoom at cursor"),
+    opts.enablePan &&
+      h("span", {}, h("kbd", {}, "Space / axis drag"), " pan"),
     h("span", {}, h("kbd", {}, "Shift+click"), " previous zoom"),
     h("span", {}, h("kbd", {}, "Reset"), " full view"),
   );
@@ -1676,10 +1767,12 @@ function mountTimeline(container, passages) {
 
   // ---- interaction ----
   //
-  // Drag (mouse or single touch) paints a brush rectangle; on release we
-  // zoom to that range. Wheel + buttons zoom centered. Pinch (2 fingers)
-  // zooms continuously. There is no pan — every interaction either zooms
-  // in (brush, wheel down, +) or out (wheel up, −, reset).
+  // Drag (mouse or single touch) in the spike area paints a brush rectangle;
+  // on release we zoom to that range. Wheel + buttons zoom centered. Pinch
+  // (2 fingers) zooms continuously. When opts.enablePan is set, panning is
+  // available via middle-mouse, Space+drag, or a drag on the bottom axis strip
+  // — it shifts the view window without zooming. A clean click (no drag) calls
+  // opts.onClick with the nearest point's source row, for click-to-navigate.
 
   const BRUSH_MIN_PX = 6;
 
@@ -1687,6 +1780,11 @@ function mountTimeline(container, passages) {
   let brushStartPx = 0;
   let brushCurPx = 0;
   let brushRect = null;
+
+  let panning = false;
+  let panStartPx = 0;
+  let panStartView = null;
+  let spaceHeld = false;
 
   let pinchActive = false;
   let pinchStartDist = 0;
@@ -1696,6 +1794,34 @@ function mountTimeline(container, passages) {
   function localX(clientX) {
     const rect = svgWrap.getBoundingClientRect();
     return Math.max(0, Math.min(width, clientX - rect.left));
+  }
+
+  // Y (in wrap coords) below which the axis strip lives; dragging there pans.
+  function axisBaseY() {
+    return (svgWrap.clientHeight || 140) - 32;
+  }
+
+  function startPan(clientX) {
+    panning = true;
+    panStartPx = localX(clientX);
+    panStartView = { start: viewStart, end: viewEnd };
+    tooltip.style.display = "none";
+    svgWrap.classList.add("is-panning");
+  }
+
+  function findNearestPx(x) {
+    const tolerancePx = 14;
+    let nearest = null;
+    let nearestDistPx = Infinity;
+    for (const d of data) {
+      if (d.ts < viewStart || d.ts > viewEnd) continue;
+      const dPx = Math.abs(tsToPx(d.ts) - x);
+      if (dPx < tolerancePx && dPx < nearestDistPx) {
+        nearest = d;
+        nearestDistPx = dPx;
+      }
+    }
+    return nearest;
   }
 
   function startBrush(clientX) {
@@ -1763,6 +1889,15 @@ function mountTimeline(container, passages) {
   );
 
   svgWrap.addEventListener("mousedown", (ev) => {
+    if (opts.enablePan) {
+      const onAxis =
+        ev.clientY - svgWrap.getBoundingClientRect().top > axisBaseY();
+      if (ev.button === 1 || (ev.button === 0 && (spaceHeld || onAxis))) {
+        ev.preventDefault();
+        startPan(ev.clientX);
+        return;
+      }
+    }
     if (ev.button !== 0) return;
     if (ev.shiftKey) {
       ev.preventDefault();
@@ -1774,6 +1909,13 @@ function mountTimeline(container, passages) {
   });
 
   function onMouseMove(ev) {
+    if (panning) {
+      const dxPx = localX(ev.clientX) - panStartPx;
+      const span = panStartView.end - panStartView.start;
+      const dts = -(dxPx / Math.max(1, width)) * span;
+      setView(panStartView.start + dts, panStartView.end + dts);
+      return;
+    }
     if (brushing) {
       brushCurPx = localX(ev.clientX);
       updateBrushRect();
@@ -1783,7 +1925,23 @@ function mountTimeline(container, passages) {
   }
 
   function onMouseUp() {
-    if (brushing) commitBrush();
+    if (panning) {
+      panning = false;
+      svgWrap.classList.remove("is-panning");
+      return;
+    }
+    if (brushing) {
+      // A press that never moved past the brush threshold is a click: navigate
+      // to the nearest point instead of zooming.
+      const dx = Math.abs(brushCurPx - brushStartPx);
+      if (dx < BRUSH_MIN_PX && opts.onClick) {
+        const nearest = findNearestPx(brushStartPx);
+        clearBrush();
+        if (nearest) opts.onClick(nearest.row);
+        return;
+      }
+      commitBrush();
+    }
   }
 
   window.addEventListener("mousemove", onMouseMove);
@@ -1793,11 +1951,26 @@ function mountTimeline(container, passages) {
     if (!brushing) tooltip.style.display = "none";
   });
 
-  // Cancel an in-progress brush with Escape.
+  // Escape cancels an in-progress brush/pan; Space (when hovering) arms pan mode.
   function onKeyDown(ev) {
-    if (ev.key === "Escape" && brushing) clearBrush();
+    if (ev.key === "Escape") {
+      if (brushing) clearBrush();
+      if (panning) {
+        panning = false;
+        svgWrap.classList.remove("is-panning");
+      }
+    }
+    if (opts.enablePan && ev.code === "Space" && !ev.repeat) {
+      spaceHeld = true;
+      // Don't let Space scroll the page while panning the timeline.
+      if (svgWrap.matches(":hover")) ev.preventDefault();
+    }
+  }
+  function onKeyUp(ev) {
+    if (ev.code === "Space") spaceHeld = false;
   }
   window.addEventListener("keydown", onKeyDown);
+  window.addEventListener("keyup", onKeyUp);
 
   function showTooltipAt(clientX) {
     const rect = svgWrap.getBoundingClientRect();
@@ -1821,10 +1994,20 @@ function mountTimeline(container, passages) {
       tooltip.style.display = "none";
       return;
     }
-    const parts = [fmtDateTime.format(new Date(nearest.ts))];
-    if (nearest.score != null) parts.push(`score ${nearest.score.toFixed(2)}`);
-    if (nearest.camera) parts.push(nearest.camera);
-    tooltip.textContent = parts.join("  ·  ");
+    if (opts.formatTooltip) {
+      const content = opts.formatTooltip(nearest);
+      if (content instanceof Node) {
+        clear(tooltip);
+        tooltip.appendChild(content);
+      } else {
+        tooltip.textContent = String(content);
+      }
+    } else {
+      const parts = [fmtDateTime.format(new Date(nearest.ts))];
+      if (nearest.score != null) parts.push(`score ${nearest.score.toFixed(2)}`);
+      if (nearest.camera) parts.push(nearest.camera);
+      tooltip.textContent = parts.join("  ·  ");
+    }
     tooltip.style.left = `${tsToPx(nearest.ts)}px`;
     tooltip.style.top = `${(svgWrap.clientHeight || 140) - 32 - 6}px`;
     tooltip.style.display = "block";
@@ -1912,6 +2095,7 @@ function mountTimeline(container, passages) {
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
       window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
       ro.disconnect();
       mo.disconnect();
     }
@@ -1936,9 +2120,10 @@ function route() {
   if (hash === "#/" || hash === "#" || hash === "") {
     setActiveTab("plates");
     renderPlates();
-  } else if (hash === "#/sightings") {
+  } else if (hash === "#/sightings" || hash.startsWith("#/sightings?")) {
     setActiveTab("sightings");
-    renderSightings();
+    const q = new URLSearchParams(hash.split("?")[1] || "");
+    renderSightings(q.get("view") === "timeline" ? "timeline" : "list");
   } else if (hash.startsWith("#/plate/")) {
     setActiveTab("plates");
     const plate = decodeURIComponent(hash.slice("#/plate/".length));

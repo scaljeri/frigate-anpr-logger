@@ -72,10 +72,14 @@
     <template id="tpl-sightings">
       <section class="view">
         <div class="toolbar">
-          <h2 class="view-title">Recent passages</h2>
+          <nav class="tabs subtabs" role="tablist">
+            <button class="tab" data-subview="list" type="button" role="tab">List</button>
+            <button class="tab" data-subview="timeline" type="button" role="tab">Timeline</button>
+          </nav>
           <div class="toolbar-meta" id="sightings-meta"></div>
         </div>
         <div id="sightings-list" class="list-wrap"></div>
+        <div id="sightings-timeline" class="timeline-wrap" hidden></div>
       </section>
     </template>
 

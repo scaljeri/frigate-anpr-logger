@@ -158,6 +158,19 @@ button {
   color: var(--accent);
 }
 
+/* Button-based tabs (Passages List|Timeline) — reset native button chrome so
+   they match the anchor tabs above. */
+.subtabs .tab {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.subtabs .tab.active {
+  background: var(--accent-soft);
+}
+
 /* ---------- main + footer ---------- */
 
 .main {
@@ -631,6 +644,10 @@ button {
 
 .timeline-svg-wrap.is-brushing {
   cursor: ew-resize;
+}
+
+.timeline-svg-wrap.is-panning {
+  cursor: grabbing;
 }
 
 .timeline-svg-wrap svg {
