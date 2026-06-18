@@ -24,6 +24,7 @@
   },
   "request": {
     "method": "GET",
+    "drop_hyphens": true,
     "url": "https://opendata.rdw.nl/resource/m9d7-ebf2.json",
     "query": { "kenteken": "{plate}" },
     "headers": {},

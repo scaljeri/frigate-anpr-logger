@@ -273,6 +273,37 @@ def _interpolate(value, plate: str):
     return value
 
 
+def format_plate_hyphenated(plate: str, provider: dict) -> str:
+    """Re-insert separators into a clean plate using the provider's sidecodes.
+
+    Our canonical plate is always separator-free (it's the DB key, used for
+    dedup and ``plate_match``), but some registries expect the hyphenated form
+    on the wire. We walk the provider's ``plate_format.sidecodes`` and apply the
+    first matching rule's two dash positions — the same logic the frontend uses
+    for display. No sidecodes or no match → the plate is returned unchanged.
+
+    Patterns are compiled inline; this runs once per plate (lookups are cached)
+    and ``re`` caches compiled patterns, so there's no need to pre-compile into
+    the provider dict — which would also break ``GET /providers`` serialization.
+    """
+    sidecodes = (provider.get("plate_format") or {}).get("sidecodes") or []
+    for sc in sidecodes:
+        if not isinstance(sc, dict):
+            continue
+        pattern = sc.get("pattern")
+        parts = sc.get("parts")
+        if not pattern or not isinstance(parts, list) or len(parts) != 2:
+            continue
+        try:
+            matched = re.search(pattern, plate)
+        except re.error:
+            continue
+        if matched:
+            p0, p1 = parts
+            return f"{plate[:p0]}-{plate[p0:p1]}-{plate[p1:]}"
+    return plate
+
+
 def fetch_vehicle(plate: str, provider: dict) -> object | None:
     """Run the provider's HTTP request and return the (root-resolved) payload.
 
@@ -282,9 +313,13 @@ def fetch_vehicle(plate: str, provider: dict) -> object | None:
     """
     request = provider.get("request", {})
     method = (request.get("method") or "GET").upper()
-    url = _interpolate(request.get("url", ""), plate)
-    query = _interpolate(request.get("query") or {}, plate)
-    headers = _interpolate(request.get("headers") or {}, plate)
+    # Some registries expect the hyphenated plate on the wire. Our canonical
+    # plate is always separator-free, so when a provider opts out of dropping
+    # hyphens we re-insert them via its sidecodes before interpolation.
+    outbound = plate if request.get("drop_hyphens", True) else format_plate_hyphenated(plate, provider)
+    url = _interpolate(request.get("url", ""), outbound)
+    query = _interpolate(request.get("query") or {}, outbound)
+    headers = _interpolate(request.get("headers") or {}, outbound)
     body = request.get("body")
     timeout = float(request.get("timeout_seconds") or 10)
 
@@ -294,7 +329,7 @@ def fetch_vehicle(plate: str, provider: dict) -> object | None:
 
     data: bytes | None = None
     if body is not None and method != "GET":
-        body = _interpolate(body, plate)
+        body = _interpolate(body, outbound)
         if isinstance(body, (dict, list)):
             data = json.dumps(body).encode()
             headers.setdefault("Content-Type", "application/json")

@@ -38,6 +38,7 @@ is cached as a negative result (no HTTP call).
   "plate_match": "^[A-Z0-9]{6}$",
   "request": {
     "method": "GET",
+    "drop_hyphens": true,
     "url": "https://opendata.rdw.nl/resource/m9d7-ebf2.json",
     "query": { "kenteken": "{plate}" },
     "headers": {},
@@ -67,6 +68,20 @@ is cached as a negative result (no HTTP call).
 - every value in `request.query`
 - every value in `request.headers`
 - every string anywhere inside `request.body`
+
+### `request.drop_hyphens` — plate separators on the wire
+
+**Optional, defaults to `true`.** Our canonical plate is always separator-free
+(`GVF57G`) — that's the cache key and what `plate_match` runs against. Most
+registries (RDW included) want exactly that, so by default `{plate}` is
+interpolated as the clean form.
+
+Set `"drop_hyphens": false` when a registry expects the **hyphenated** plate
+(`GVF-57-G`). The backend then re-inserts the separators using this provider's
+`plate_format.sidecodes` (below) before interpolation, so every `{plate}` in
+the request — url, query, headers, body — gets the hyphenated form. A provider
+with no matching sidecode (or no `plate_format` at all) falls back to the clean
+plate, so the flag is safe to set even before you've defined the rules.
 
 ### `plate_format` — country-specific hyphenation
 
