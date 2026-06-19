@@ -14,10 +14,12 @@ container). Schema migrations run automatically at startup; see
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import sqlite3
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -500,7 +502,7 @@ def ensure_vehicle(conn, plate: str, force: bool = False, provider: dict | None 
 
 
 # ---------------------------------------------------------------------------
-# Frigate snapshot capture (one image per plate, fetched on first sighting)
+# Frigate snapshot capture (refreshed to the latest event on each sighting)
 # ---------------------------------------------------------------------------
 
 
@@ -510,25 +512,35 @@ def _snapshot_path(plate: str) -> Path:
 
 
 def maybe_fetch_snapshot(plate: str, event_id: str) -> None:
-    """Pull Frigate's snapshot for ``event_id`` if we don't have one for ``plate`` yet.
+    """Refresh ``SNAPSHOTS_DIR/<plate>.jpg`` from Frigate for this event.
 
-    Side-effect: writes ``SNAPSHOTS_DIR/<plate>.jpg``. Errors are logged but
-    never raised — a missing snapshot is fine, the sighting itself still landed.
+    Called on every new sighting, so a plate's photo tracks its most recent
+    pass. We re-fetch the snapshot for the latest ``event_id`` and replace the
+    stored image **only if a new one is successfully retrieved**: the download
+    lands in a temp file and is atomically swapped in, so a failed/empty
+    response never clobbers the previous good image (the plate keeps its last
+    photo). Errors are logged but never raised — a missing snapshot is fine,
+    the sighting itself still landed.
     """
     if not FRIGATE_URL or not event_id:
         return
     dest = _snapshot_path(plate)
-    if dest.exists():
-        return
     url = f"{FRIGATE_URL}/api/events/{event_id}/snapshot.jpg"
     try:
         with urllib.request.urlopen(url, timeout=SNAPSHOT_TIMEOUT) as resp:
             body = resp.read()
+        if not body:
+            log.info("Snapshot for %s (event %s) was empty; keeping existing.", plate, event_id)
+            return
         SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(body)
-        log.info("Snapshot cached for %s (%d bytes)", plate, len(body))
+        # Write then atomically swap, so a partial write or a later failure
+        # can't destroy the image we already had.
+        tmp = dest.with_name(f"{plate}.{os.getpid()}.tmp")
+        tmp.write_bytes(body)
+        tmp.replace(dest)  # atomic within the same directory
+        log.info("Snapshot updated for %s (%d bytes)", plate, len(body))
     except Exception as e:  # noqa: BLE001 — best-effort; failure is non-fatal
-        log.warning("Snapshot fetch failed for %s via %s: %s", plate, url, e)
+        log.warning("Snapshot fetch failed for %s via %s: %s — keeping existing.", plate, url, e)
 
 
 def migrate_snapshot(src_plate: str, dst_plate: str) -> None:
@@ -550,6 +562,46 @@ def migrate_snapshot(src_plate: str, dst_plate: str) -> None:
             src.replace(dst)  # atomic rename within the same directory
     except OSError as e:
         log.warning("Snapshot move %s -> %s failed: %s", src, dst, e)
+
+
+# ---------------------------------------------------------------------------
+# Enrichment worker (keeps slow network calls off the MQTT loop thread)
+# ---------------------------------------------------------------------------
+# Vehicle-registry lookups and Frigate snapshot fetches are network calls that
+# can each take seconds. Running them inline in on_message blocks paho's single
+# network-loop thread, so a slow provider/snapshot response stops the MQTT
+# keepalive (PINGREQ) from going out, the broker drops the client, and
+# ingestion silently stalls until the process is restarted. To keep the
+# callback fast we do only the DB insert there and hand the slow work to this
+# background queue — the callback returns immediately and keepalive is always
+# serviced. Enrichment is idempotent (ensure_vehicle/maybe_fetch_snapshot both
+# no-op when already cached), so a deferred or retried job is harmless.
+_enrich_q: "queue.Queue[tuple[str, str | None]]" = queue.Queue()
+
+
+def _enrich_worker() -> None:
+    """Drain the enrichment queue forever: vehicle lookup + snapshot fetch.
+
+    One job = one sighting's plate + Frigate event id. Exceptions are logged
+    and swallowed so a single bad job (e.g. a provider outage) can never kill
+    the worker and freeze all future enrichment.
+    """
+    while True:
+        plate, event_id = _enrich_q.get()
+        try:
+            with db() as conn:
+                ensure_vehicle(conn, plate)
+            if FRIGATE_URL and event_id:
+                maybe_fetch_snapshot(plate, event_id)
+        except Exception:  # noqa: BLE001 — never let one job kill the worker
+            log.exception("Enrichment failed for %s", plate)
+        finally:
+            _enrich_q.task_done()
+
+
+def start_enrichment_worker() -> None:
+    threading.Thread(target=_enrich_worker, name="enrich", daemon=True).start()
+    log.info("Enrichment worker started")
 
 
 # ---------------------------------------------------------------------------
@@ -628,12 +680,13 @@ def on_message(client, userdata, msg):
         conn.commit()
         log.info("Sighting: %s (LPR score %.2f, cam %s, name %r)",
                  plate, lpr_score, camera, name)
-        ensure_vehicle(conn, plate)
 
-    # Snapshot fetch outside the DB context — Frigate's HTTP API is its own
-    # service; we don't want to hold the SQLite connection open during the call.
-    if FRIGATE_URL and event_id:
-        maybe_fetch_snapshot(plate, event_id)
+    # Vehicle lookup + snapshot fetch are slow network calls. Hand them to the
+    # background worker so this callback returns immediately — blocking here
+    # would starve the MQTT keepalive and eventually freeze ingestion. The
+    # sighting is already persisted; enrichment fills in make/model/snapshot a
+    # moment later.
+    _enrich_q.put((plate, event_id))
 
 
 def start_mqtt():
@@ -646,6 +699,9 @@ def start_mqtt():
         client.username_pw_set(MQTT_USER, MQTT_PASS)
     client.on_connect = on_connect
     client.on_message = on_message
+    # Stand up the enrichment worker before we start consuming, so the first
+    # sighting's lookup has somewhere to go.
+    start_enrichment_worker()
     while True:
         try:
             client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
@@ -970,7 +1026,13 @@ def list_sightings(
     args.append(limit)
     sql = f"{_SIGHTING_SELECT} {where} ORDER BY s.seen_at DESC LIMIT ?"
     with db() as conn:
-        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+        rows = [dict(r) for r in conn.execute(sql, args).fetchall()]
+    # Flag whether a cached snapshot exists per plate, so the list view can show
+    # a thumbnail without firing a request per row just to discover a 404 (same
+    # annotation /counts adds for the plates table).
+    for row in rows:
+        row["has_snapshot"] = _snapshot_path(row["plate"]).is_file()
+    return rows
 
 
 @app.get("/sightings/{sighting_id}")

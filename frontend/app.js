@@ -1166,6 +1166,58 @@ async function renderDetail(plate) {
   hideOverlay();
 }
 
+// Shared time filter for the Passages views. null = no explicit range (the
+// timeline shows the last 7 days; the list shows recent passages). When the
+// user narrows the timeline to a sub-window, this holds {from, to} in epoch-ms
+// and BOTH sub-views honor it — switching to the List tab then shows exactly the
+// events that were visible in the filtered timeline. Lives at module scope so
+// it survives the hash-driven re-render when the user flips sub-tabs.
+let sightingsFilter = null;
+
+// Zoom-history (shift-click "step back" stack) for the Passages timeline. Kept
+// at module scope and passed into mountTimeline by reference, so the steps
+// survive a List/Timeline sub-tab switch while the user stays on the page. Tied
+// to the filter session: reset whenever the filter is cleared / absent.
+let sightingsTimelineHistory = [];
+
+// Render the "start → end ✕" filter chip next to the List/Timeline sub-tabs,
+// or hide it when no range is active.
+function renderSightingsFilterChip() {
+  const el = document.getElementById("sightings-filter");
+  if (!el) return;
+  clear(el);
+  if (!sightingsFilter) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.appendChild(
+    h(
+      "span.filter-chip-range",
+      {},
+      `${fmtDateTime.format(new Date(sightingsFilter.from))}  →  ${fmtDateTime.format(new Date(sightingsFilter.to))}`,
+    ),
+  );
+  el.appendChild(
+    h(
+      "button.filter-chip-x",
+      {
+        type: "button",
+        title: "Clear time filter",
+        "aria-label": "Clear time filter",
+        onClick: clearSightingsFilter,
+      },
+      "✕",
+    ),
+  );
+}
+
+function clearSightingsFilter() {
+  sightingsFilter = null;
+  sightingsTimelineHistory = []; // back to the begin state; drop the step stack
+  route(); // re-render the current sub-view without the filter
+}
+
 async function renderSightings(subview = "list") {
   renderTemplate("tpl-sightings");
 
@@ -1179,6 +1231,10 @@ async function renderSightings(subview = "list") {
         view === "timeline" ? "#/sightings?view=timeline" : "#/sightings";
     });
   }
+
+  // The time filter chip is shared by both sub-views (it carries the range
+  // across a sub-tab switch).
+  renderSightingsFilterChip();
 
   const listEl = document.getElementById("sightings-list");
   const tlEl = document.getElementById("sightings-timeline");
@@ -1195,9 +1251,18 @@ async function renderSightingsList() {
 
   listEl.appendChild(h("div.status", {}, "Loading…"));
 
+  // Honor the shared time filter: when set, the list shows the same window as
+  // the filtered timeline. Otherwise it falls back to the recent passages.
+  let query = "/sightings?limit=500";
+  if (sightingsFilter) {
+    query +=
+      `&from=${encodeURIComponent(new Date(sightingsFilter.from).toISOString())}` +
+      `&to=${encodeURIComponent(new Date(sightingsFilter.to).toISOString())}`;
+  }
+
   let sightings;
   try {
-    sightings = await apiGet("/sightings?limit=500");
+    sightings = await apiGet(query);
   } catch (e) {
     clear(listEl);
     listEl.appendChild(h("div.status.error", {}, `Failed to fetch /sightings: ${e.message}`));
@@ -1207,11 +1272,22 @@ async function renderSightingsList() {
   clear(listEl);
 
   if (!sightings.length) {
-    listEl.appendChild(h("div.status", {}, "No passages logged yet."));
+    listEl.appendChild(
+      h(
+        "div.status",
+        {},
+        sightingsFilter
+          ? "No passages in the selected period."
+          : "No passages logged yet.",
+      ),
+    );
     return;
   }
 
-  metaEl.textContent = `${sightings.length} recent passage${sightings.length === 1 ? "" : "s"}`;
+  const n = sightings.length;
+  metaEl.textContent = sightingsFilter
+    ? `${n} passage${n === 1 ? "" : "s"}`
+    : `${n} recent passage${n === 1 ? "" : "s"}`;
 
   // Group by local-timezone day (browser-derived).
   const groups = new Map();
@@ -1227,18 +1303,21 @@ async function renderSightingsList() {
 
     const section = h("div.sightings-section");
     for (const s of items) {
+      // Mirror the fields shown on the home (Plates) list: photo, plate,
+      // vehicle, colour, year — plus the passage-specific time and camera.
       const row = h(
         "a.sighting-row",
         { href: `#/plate/${encodeURIComponent(s.plate)}` },
         h("span.sighting-time", {}, fmtTime.format(new Date(s.seen_at))),
-        plateBadge(s.plate, { small: true, display: s.raw_plate }),
         h(
-          "span.sighting-meta",
+          "span.sighting-photo",
           {},
-          vehicleLabel(s) ||
-            (s.colour ? titleCase(s.colour) : null) ||
-            h("span.muted", {}, "—"),
+          s.has_snapshot ? snapshotThumb(s.plate) : null,
         ),
+        plateBadge(s.plate, { small: true, display: s.raw_plate }),
+        h("span.sighting-vehicle", {}, vehicleLabel(s) || muted()),
+        h("span.sighting-colour", {}, s.colour ? titleCase(s.colour) : muted()),
+        h("span.sighting-year", {}, s.year || muted()),
         h("span.sighting-camera", {}, s.camera || ""),
       );
       section.appendChild(row);
@@ -1257,13 +1336,20 @@ async function renderSightingsTimeline() {
   wrap.appendChild(h("div.status", {}, "Loading…"));
 
   const now = Date.now();
-  const start = now - 7 * 24 * 60 * 60 * 1000; // current week: now-7d .. now
+  const start = now - 7 * 24 * 60 * 60 * 1000; // the full window: now-7d .. now
   const LIMIT = 5000;
+
+  // Fetch enough to cover both the full 7-day window and an active sub-filter
+  // (which is always within the last 7 days, but the window's `now` may have
+  // advanced since the filter was set on an earlier visit).
+  const fetchStart = sightingsFilter
+    ? Math.min(start, sightingsFilter.from)
+    : start;
 
   let sightings;
   try {
     sightings = await apiGet(
-      `/sightings?from=${encodeURIComponent(new Date(start).toISOString())}` +
+      `/sightings?from=${encodeURIComponent(new Date(fetchStart).toISOString())}` +
         `&to=${encodeURIComponent(new Date(now).toISOString())}&limit=${LIMIT}`,
     );
   } catch (e) {
@@ -1277,14 +1363,50 @@ async function renderSightingsTimeline() {
   clear(wrap);
 
   const capped = sightings.length >= LIMIT;
-  metaEl.textContent = `${sightings.length}${capped ? "+" : ""} passage${
-    sightings.length === 1 ? "" : "s"
-  } this week`;
+  // Pre-parse timestamps once so the live count (recomputed as the user
+  // pans/zooms) stays cheap.
+  const tsList = sightings
+    .map((s) => Date.parse(s.seen_at))
+    .filter(Number.isFinite);
+  const countInWindow = (a, b) =>
+    tsList.reduce((n, t) => n + (t >= a && t <= b ? 1 : 0), 0);
+  const fullWeekCount = countInWindow(start, now);
+  const plural = (n) => (n === 1 ? "" : "s");
+
+  // Fired on every view change (pan/zoom/brush/reset). When the view spans the
+  // full 7 days we treat it as "no filter": clear the shared filter, hide the
+  // chip, and label it "last 7 days". Once narrowed, we store the window as the
+  // shared filter (so the List tab shows the same events), surface it in the
+  // chip, and report just the count for the selected period.
+  function onTimelineView(viewStart, viewEnd) {
+    const isFull =
+      Math.abs(viewStart - start) < 1000 && Math.abs(viewEnd - now) < 1000;
+    if (isFull) {
+      sightingsFilter = null;
+      metaEl.textContent = `${fullWeekCount}${capped ? "+" : ""} passage${plural(fullWeekCount)} last 7 days`;
+    } else {
+      sightingsFilter = { from: viewStart, to: viewEnd };
+      const n = countInWindow(viewStart, viewEnd);
+      metaEl.textContent = `${n} passage${plural(n)}`;
+    }
+    renderSightingsFilterChip();
+  }
+
+  // Without an active filter we start at the full week, so the step stack
+  // should start empty too (don't carry stale steps from a prior session).
+  if (!sightingsFilter) sightingsTimelineHistory = [];
 
   mountTimeline(wrap, sightings, {
+    // Full week stays the reset target + bounds anchor; open on the active
+    // filter window (if any) via initialView, so Reset and shift-click still
+    // zoom back out to the full week (and clear the filter).
     initialStart: start,
     initialEnd: now,
+    initialView: sightingsFilter ? [sightingsFilter.from, sightingsFilter.to] : null,
+    // Persist the shift-click step stack across sub-tab switches (by reference).
+    history: sightingsTimelineHistory,
     enablePan: true,
+    onViewChange: onTimelineView,
     formatTooltip: (pt) => {
       const r = pt.row;
       const parts = [
@@ -1518,6 +1640,13 @@ function mountTimeline(container, passages, opts = {}) {
 
   let viewStart = initialStart;
   let viewEnd = initialEnd;
+  // Optionally open on a narrower sub-window (e.g. a restored time filter) while
+  // keeping initialStart/End as the reset target + bounds anchor, so Reset and
+  // shift-click still zoom back out to the full window.
+  if (Array.isArray(opts.initialView)) {
+    viewStart = opts.initialView[0];
+    viewEnd = opts.initialView[1];
+  }
 
   // DOM scaffold.
   const toolbar = h("div.timeline-toolbar");
@@ -1621,12 +1750,16 @@ function mountTimeline(container, passages, opts = {}) {
 
   // ---- zoom history ----
   //
-  // Discrete actions (brush, +/− button, Reset) push the current view to the
-  // stack before changing. Continuous actions (wheel, pinch) do NOT push, so
-  // undo brings you back to the last deliberate zoom step.
+  // Every deliberate zoom records the prior view so shift-click / undo steps
+  // back through them one at a time. Discrete actions (brush, +/− button,
+  // Reset) push directly; continuous gestures (wheel, pinch) push once at the
+  // start of each gesture (coalesced) so a burst of wheel ticks is one step.
+  // Capped at MAX_HISTORY; when the stack is exhausted, undo() resets to the
+  // initial view. The caller may pass `opts.history` (an array used by
+  // reference) to persist the stack across re-mounts.
 
-  const MAX_HISTORY = 50;
-  const history = [];
+  const MAX_HISTORY = 10;
+  const history = Array.isArray(opts.history) ? opts.history : [];
 
   function pushHistory() {
     const top = history[history.length - 1];
@@ -1637,16 +1770,30 @@ function mountTimeline(container, passages, opts = {}) {
   }
 
   function undo() {
-    if (!history.length) return;
-    const [s, e] = history.pop();
-    viewStart = s;
-    viewEnd = e;
-    render();
-    updateUndoBtn();
+    if (history.length) {
+      const [s, e] = history.pop();
+      viewStart = s;
+      viewEnd = e;
+      render();
+      updateUndoBtn();
+      return;
+    }
+    // Nothing recorded (e.g. zoomed in via wheel, or the view opened on a
+    // restored filter window): treat shift-click / undo as "zoom back out" to
+    // the initial full window instead of a no-op.
+    if (viewStart !== initialStart || viewEnd !== initialEnd) {
+      setView(initialStart, initialEnd);
+    }
   }
 
   function updateUndoBtn() {
-    undoBtn.disabled = history.length === 0;
+    // Enabled whenever undo() would do something: a recorded step exists, or
+    // we're zoomed in past the full window (the zoom-out fallback). Keeps the
+    // button in sync with shift-click. Refreshed from render() on every view.
+    undoBtn.disabled =
+      history.length === 0 &&
+      viewStart === initialStart &&
+      viewEnd === initialEnd;
   }
 
   function zoomButton(factor) {
@@ -1763,6 +1910,12 @@ function mountTimeline(container, passages, opts = {}) {
 
     // Range label
     rangeLabel.textContent = `${fmtDateTime.format(new Date(viewStart))}  →  ${fmtDateTime.format(new Date(viewEnd))}`;
+
+    // Let callers react to the visible window (e.g. update a passage count).
+    if (opts.onViewChange) opts.onViewChange(viewStart, viewEnd);
+
+    // Keep the undo/zoom-out button in sync with the current view.
+    updateUndoBtn();
   }
 
   // ---- interaction ----
@@ -1876,6 +2029,10 @@ function mountTimeline(container, passages, opts = {}) {
     clearBrush();
   }
 
+  // Coalesce a burst of wheel ticks into a single undo step: record the view
+  // once per gesture (after a pause), not on every tick.
+  let lastWheelMs = -Infinity;
+  const WHEEL_STEP_GAP_MS = 300;
   svgWrap.addEventListener(
     "wheel",
     (ev) => {
@@ -1883,6 +2040,8 @@ function mountTimeline(container, passages, opts = {}) {
       const anchorTs = pxToTs(localX(ev.clientX));
       // Trackpad pinch shows up as ctrlKey + wheel — same handler covers it.
       const factor = Math.exp(ev.deltaY * 0.0015);
+      if (ev.timeStamp - lastWheelMs > WHEEL_STEP_GAP_MS) pushHistory();
+      lastWheelMs = ev.timeStamp;
       zoom(factor, anchorTs);
     },
     { passive: false },
@@ -2023,6 +2182,8 @@ function mountTimeline(container, passages, opts = {}) {
       } else if (ev.touches.length === 2) {
         ev.preventDefault();
         clearBrush();
+        // One undo step per pinch gesture (recorded as the second finger lands).
+        pushHistory();
         pinchActive = true;
         const t1 = ev.touches[0];
         const t2 = ev.touches[1];
