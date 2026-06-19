@@ -1166,12 +1166,69 @@ async function renderDetail(plate) {
   hideOverlay();
 }
 
-// Shared time filter for the Passages views. null = no explicit range (the
-// timeline shows the last 7 days; the list shows recent passages). When the
-// user narrows the timeline to a sub-window, this holds {from, to} in epoch-ms
-// and BOTH sub-views honor it — switching to the List tab then shows exactly the
-// events that were visible in the filtered timeline. Lives at module scope so
-// it survives the hash-driven re-render when the user flips sub-tabs.
+// Quick-range presets for the Passages page. Each maps "now" to a [from, to]
+// window in epoch-ms using local-time calendar boundaries.
+function _startOfDay(ms) {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+const SIGHTINGS_PRESETS = [
+  { key: "today", label: "Today", range: (now) => [_startOfDay(now), now] },
+  {
+    key: "yesterday",
+    label: "Yesterday",
+    range: (now) => {
+      const today = _startOfDay(now);
+      return [_startOfDay(today - 1), today];
+    },
+  },
+  {
+    key: "week",
+    label: "This week",
+    range: (now) => {
+      const d = new Date(now);
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // back to Monday
+      return [d.getTime(), now];
+    },
+  },
+  {
+    key: "month",
+    label: "This month",
+    range: (now) => {
+      const d = new Date(now);
+      d.setHours(0, 0, 0, 0);
+      d.setDate(1);
+      return [d.getTime(), now];
+    },
+  },
+];
+
+// Preset that's active by default when no explicit range is chosen.
+const DEFAULT_SIGHTINGS_PRESET = "week";
+
+// The page's base window: the chosen preset, or — by default — "this week".
+// Returns [from, to, label].
+function sightingsBaseRange() {
+  if (sightingsBase) {
+    return [sightingsBase.from, sightingsBase.to, sightingsBase.label];
+  }
+  const p = SIGHTINGS_PRESETS.find((x) => x.key === DEFAULT_SIGHTINGS_PRESET);
+  const [from, to] = p.range(Date.now());
+  return [from, to, p.label];
+}
+
+// Active preset/base range for the Passages page ({key, label, from, to}), or
+// null for the default rolling last-7-days window. Set by the preset buttons.
+let sightingsBase = null;
+
+// Shared time filter for the Passages views. null = viewing the full base
+// window (a preset, or "this week" by default). When the user narrows the
+// timeline to a sub-window, this holds {from, to} in epoch-ms and BOTH sub-views
+// honor it — switching to the List tab then shows exactly the events that were
+// visible in the filtered timeline. Lives at module scope so it survives the
+// hash-driven re-render when the user flips sub-tabs.
 let sightingsFilter = null;
 
 // Zoom-history (shift-click "step back" stack) for the Passages timeline. Kept
@@ -1180,8 +1237,10 @@ let sightingsFilter = null;
 // to the filter session: reset whenever the filter is cleared / absent.
 let sightingsTimelineHistory = [];
 
-// Render the "start → end ✕" filter chip next to the List/Timeline sub-tabs,
-// or hide it when no range is active.
+// Render the zoom-range chip next to the sub-tabs: the zoomed "start → end"
+// window, when the user has narrowed inside the base. An active preset shows
+// its own ✕ (in its pill), so the chip is only for the zoom sub-range; its ✕
+// drops just the zoom and returns to the full base window.
 function renderSightingsFilterChip() {
   const el = document.getElementById("sightings-filter");
   if (!el) return;
@@ -1203,19 +1262,83 @@ function renderSightingsFilterChip() {
       "button.filter-chip-x",
       {
         type: "button",
-        title: "Clear time filter",
-        "aria-label": "Clear time filter",
-        onClick: clearSightingsFilter,
+        title: "Clear zoom",
+        "aria-label": "Clear zoom",
+        onClick: clearSightingsZoom,
       },
       "✕",
     ),
   );
 }
 
+// Render the quick-range preset buttons. The active one is highlighted and
+// carries an inline ✕ (inside the same highlighted pill) that clears it.
+function renderSightingsPresets() {
+  const el = document.getElementById("sightings-presets");
+  if (!el) return;
+  clear(el);
+  // A custom zoom range (sightingsFilter) matches no preset, so nothing is
+  // highlighted. Otherwise "week" is active by default when no preset is set.
+  const activeKey = sightingsFilter
+    ? null
+    : sightingsBase
+      ? sightingsBase.key
+      : DEFAULT_SIGHTINGS_PRESET;
+  for (const p of SIGHTINGS_PRESETS) {
+    const active = activeKey === p.key;
+    const pill = h("span.preset" + (active ? ".active" : ""), {});
+    pill.appendChild(
+      h(
+        "button.preset-label",
+        { type: "button", title: p.label, onClick: () => applySightingsPreset(p) },
+        p.label,
+      ),
+    );
+    // The clear ✕ only on a non-default chosen preset — the default "week" is
+    // the home state, so there's nothing to clear it back to.
+    if (active && p.key !== DEFAULT_SIGHTINGS_PRESET) {
+      pill.appendChild(
+        h(
+          "button.preset-x",
+          {
+            type: "button",
+            title: "Clear range",
+            "aria-label": "Clear range",
+            onClick: clearSightingsFilter,
+          },
+          "✕",
+        ),
+      );
+    }
+    el.appendChild(pill);
+  }
+}
+
+function applySightingsPreset(p) {
+  if (p.key === DEFAULT_SIGHTINGS_PRESET) {
+    sightingsBase = null; // the default; no explicit base needed
+  } else {
+    const [from, to] = p.range(Date.now());
+    sightingsBase = { key: p.key, label: p.label, from, to };
+  }
+  sightingsFilter = null; // open on the full preset range
+  sightingsTimelineHistory = [];
+  route();
+}
+
+// Drop just the zoom sub-window, keeping the active preset/base (the chip ✕).
+function clearSightingsZoom() {
+  sightingsFilter = null;
+  sightingsTimelineHistory = [];
+  route();
+}
+
+// Clear everything back to the default last-7-days window (the preset pill ✕).
 function clearSightingsFilter() {
   sightingsFilter = null;
-  sightingsTimelineHistory = []; // back to the begin state; drop the step stack
-  route(); // re-render the current sub-view without the filter
+  sightingsBase = null;
+  sightingsTimelineHistory = [];
+  route();
 }
 
 async function renderSightings(subview = "list") {
@@ -1232,8 +1355,9 @@ async function renderSightings(subview = "list") {
     });
   }
 
-  // The time filter chip is shared by both sub-views (it carries the range
-  // across a sub-tab switch).
+  // Preset buttons + the active-range chip are shared by both sub-views (they
+  // carry the range across a sub-tab switch).
+  renderSightingsPresets();
   renderSightingsFilterChip();
 
   const listEl = document.getElementById("sightings-list");
@@ -1251,14 +1375,14 @@ async function renderSightingsList() {
 
   listEl.appendChild(h("div.status", {}, "Loading…"));
 
-  // Honor the shared time filter: when set, the list shows the same window as
-  // the filtered timeline. Otherwise it falls back to the recent passages.
-  let query = "/sightings?limit=500";
-  if (sightingsFilter) {
-    query +=
-      `&from=${encodeURIComponent(new Date(sightingsFilter.from).toISOString())}` +
-      `&to=${encodeURIComponent(new Date(sightingsFilter.to).toISOString())}`;
-  }
+  // Honor the active window: a zoom filter takes precedence, else the base
+  // window (a chosen preset, or "this week" by default — both bound the list).
+  const [bFrom, bTo] = sightingsBaseRange();
+  const win = sightingsFilter || { from: bFrom, to: bTo };
+  const query =
+    `/sightings?limit=500` +
+    `&from=${encodeURIComponent(new Date(win.from).toISOString())}` +
+    `&to=${encodeURIComponent(new Date(win.to).toISOString())}`;
 
   let sightings;
   try {
@@ -1273,21 +1397,13 @@ async function renderSightingsList() {
 
   if (!sightings.length) {
     listEl.appendChild(
-      h(
-        "div.status",
-        {},
-        sightingsFilter
-          ? "No passages in the selected period."
-          : "No passages logged yet.",
-      ),
+      h("div.status", {}, "No passages in the selected period."),
     );
     return;
   }
 
   const n = sightings.length;
-  metaEl.textContent = sightingsFilter
-    ? `${n} passage${n === 1 ? "" : "s"}`
-    : `${n} recent passage${n === 1 ? "" : "s"}`;
+  metaEl.textContent = `${n} passage${n === 1 ? "" : "s"}`;
 
   // Group by local-timezone day (browser-derived).
   const groups = new Map();
@@ -1335,23 +1451,19 @@ async function renderSightingsTimeline() {
 
   wrap.appendChild(h("div.status", {}, "Loading…"));
 
-  const now = Date.now();
-  const start = now - 7 * 24 * 60 * 60 * 1000; // the full window: now-7d .. now
+  // The base window (active preset, or "this week" by default) sets where the
+  // timeline opens; the data itself is loaded in full so panning/zooming always
+  // has points, not just the base window.
+  const [start, end] = sightingsBaseRange();
+
+  // Load all sightings (newest LIMIT). At a home camera's volume this is a few
+  // dozen rows now and stays well under the cap for years; if it ever
+  // approaches LIMIT, switch the timeline to windowed lazy-loading (the
+  // /sightings from/to range query is already indexed for it).
   const LIMIT = 5000;
-
-  // Fetch enough to cover both the full 7-day window and an active sub-filter
-  // (which is always within the last 7 days, but the window's `now` may have
-  // advanced since the filter was set on an earlier visit).
-  const fetchStart = sightingsFilter
-    ? Math.min(start, sightingsFilter.from)
-    : start;
-
   let sightings;
   try {
-    sightings = await apiGet(
-      `/sightings?from=${encodeURIComponent(new Date(fetchStart).toISOString())}` +
-        `&to=${encodeURIComponent(new Date(now).toISOString())}&limit=${LIMIT}`,
-    );
+    sightings = await apiGet(`/sightings?limit=${LIMIT}`);
   } catch (e) {
     clear(wrap);
     wrap.appendChild(
@@ -1362,7 +1474,6 @@ async function renderSightingsTimeline() {
 
   clear(wrap);
 
-  const capped = sightings.length >= LIMIT;
   // Pre-parse timestamps once so the live count (recomputed as the user
   // pans/zooms) stays cheap.
   const tsList = sightings
@@ -1370,43 +1481,55 @@ async function renderSightingsTimeline() {
     .filter(Number.isFinite);
   const countInWindow = (a, b) =>
     tsList.reduce((n, t) => n + (t >= a && t <= b ? 1 : 0), 0);
-  const fullWeekCount = countInWindow(start, now);
+  const baseCount = countInWindow(start, end);
   const plural = (n) => (n === 1 ? "" : "s");
 
   // Fired on every view change (pan/zoom/brush/reset). When the view spans the
-  // full 7 days we treat it as "no filter": clear the shared filter, hide the
-  // chip, and label it "last 7 days". Once narrowed, we store the window as the
-  // shared filter (so the List tab shows the same events), surface it in the
-  // chip, and report just the count for the selected period.
+  // full base window we treat it as "no zoom filter": clear the sub-filter so
+  // the List shows the whole base. The label reads "this week" for the default
+  // base; for a preset the pill already names it, so we just count.
+  let presetsReflectFilter = sightingsFilter != null;
   function onTimelineView(viewStart, viewEnd) {
     const isFull =
-      Math.abs(viewStart - start) < 1000 && Math.abs(viewEnd - now) < 1000;
+      Math.abs(viewStart - start) < 1000 && Math.abs(viewEnd - end) < 1000;
     if (isFull) {
       sightingsFilter = null;
-      metaEl.textContent = `${fullWeekCount}${capped ? "+" : ""} passage${plural(fullWeekCount)} last 7 days`;
+      metaEl.textContent = sightingsBase
+        ? `${baseCount} passage${plural(baseCount)}`
+        : `${baseCount} passage${plural(baseCount)} this week`;
     } else {
       sightingsFilter = { from: viewStart, to: viewEnd };
       const n = countInWindow(viewStart, viewEnd);
       metaEl.textContent = `${n} passage${plural(n)}`;
     }
     renderSightingsFilterChip();
+    // Re-highlight presets only when the custom-range state flips: a custom
+    // zoom de-selects every preset; returning to the full base re-selects it.
+    const hasFilter = sightingsFilter != null;
+    if (hasFilter !== presetsReflectFilter) {
+      presetsReflectFilter = hasFilter;
+      renderSightingsPresets();
+    }
   }
 
-  // Without an active filter we start at the full week, so the step stack
-  // should start empty too (don't carry stale steps from a prior session).
+  // Viewing the full base window → start the step stack empty too (don't carry
+  // stale steps from a prior session).
   if (!sightingsFilter) sightingsTimelineHistory = [];
 
   mountTimeline(wrap, sightings, {
-    // Full week stays the reset target + bounds anchor; open on the active
-    // filter window (if any) via initialView, so Reset and shift-click still
-    // zoom back out to the full week (and clear the filter).
+    // The base window is the reset target + bounds anchor; open on the active
+    // zoom filter (if any) via initialView, so Reset and shift-click still
+    // zoom back out to the full base window.
     initialStart: start,
-    initialEnd: now,
+    initialEnd: end,
     initialView: sightingsFilter ? [sightingsFilter.from, sightingsFilter.to] : null,
     // Persist the shift-click step stack across sub-tab switches (by reference).
     history: sightingsTimelineHistory,
     enablePan: true,
     onViewChange: onTimelineView,
+    // The timeline's Reset button returns the whole page to the default window
+    // (clears any zoom and any chosen preset → back to "this week").
+    onReset: clearSightingsFilter,
     formatTooltip: (pt) => {
       const r = pt.row;
       const parts = [
@@ -1704,7 +1827,7 @@ function mountTimeline(container, passages, opts = {}) {
     h("span", {}, h("kbd", {}, "drag"), " select range"),
     h("span", {}, h("kbd", {}, "scroll"), " zoom at cursor"),
     opts.enablePan &&
-      h("span", {}, h("kbd", {}, "Space / axis drag"), " pan"),
+      h("span", {}, h("kbd", {}, "Shift+scroll / swipe / drag"), " pan"),
     h("span", {}, h("kbd", {}, "Shift+click"), " previous zoom"),
     h("span", {}, h("kbd", {}, "Reset"), " full view"),
   );
@@ -1802,6 +1925,12 @@ function mountTimeline(container, passages, opts = {}) {
   }
 
   function reset() {
+    // Callers can take over Reset (e.g. clear the page filter back to default);
+    // otherwise just zoom out to the full window.
+    if (opts.onReset) {
+      opts.onReset();
+      return;
+    }
     pushHistory();
     setView(initialStart, initialEnd);
   }
@@ -1921,11 +2050,12 @@ function mountTimeline(container, passages, opts = {}) {
   // ---- interaction ----
   //
   // Drag (mouse or single touch) in the spike area paints a brush rectangle;
-  // on release we zoom to that range. Wheel + buttons zoom centered. Pinch
-  // (2 fingers) zooms continuously. When opts.enablePan is set, panning is
-  // available via middle-mouse, Space+drag, or a drag on the bottom axis strip
-  // — it shifts the view window without zooming. A clean click (no drag) calls
-  // opts.onClick with the nearest point's source row, for click-to-navigate.
+  // on release we zoom to that range. Vertical wheel + buttons zoom centered.
+  // Pinch (2 fingers) zooms continuously. When opts.enablePan is set, panning
+  // is available via middle-mouse, Space+drag, a drag on the bottom axis strip,
+  // or horizontal scroll (trackpad swipe / Shift+wheel) — it shifts the view
+  // window without zooming. A clean click (no drag) calls opts.onClick with the
+  // nearest point's source row, for click-to-navigate.
 
   const BRUSH_MIN_PX = 6;
 
@@ -2037,6 +2167,21 @@ function mountTimeline(container, passages, opts = {}) {
     "wheel",
     (ev) => {
       ev.preventDefault();
+      // Horizontal intent → scroll (pan) the window left/right; vertical →
+      // zoom. Trackpads emit deltaX for a two-finger horizontal swipe; Shift+
+      // wheel is the mouse equivalent. Panning shifts the view without zooming
+      // and doesn't record an undo step (matching drag-pan).
+      if (opts.enablePan) {
+        let panDelta = 0;
+        if (ev.shiftKey) panDelta = ev.deltaY || ev.deltaX;
+        else if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) panDelta = ev.deltaX;
+        if (panDelta !== 0) {
+          const span = viewEnd - viewStart;
+          const dts = (panDelta / Math.max(1, width)) * span;
+          setView(viewStart + dts, viewEnd + dts);
+          return;
+        }
+      }
       const anchorTs = pxToTs(localX(ev.clientX));
       // Trackpad pinch shows up as ctrlKey + wheel — same handler covers it.
       const factor = Math.exp(ev.deltaY * 0.0015);
