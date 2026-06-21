@@ -46,3 +46,4 @@ MEMORY.md
 
 # Operator-specific helper scripts (rsync deploys, etc.)
 scripts/deploy.sh
+scripts/check-sync.local.sh

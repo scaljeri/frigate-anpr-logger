@@ -153,6 +153,34 @@ python3 scripts/anpr-cli.py 12ABC3
 API_URL=http://anpr.example.com:8090 python3 scripts/anpr-cli.py
 ```
 
+## Sync check
+
+Frigate publishes events at QoS 0, so any plate seen while the backend is down
+is dropped from MQTT (the backend's reconciler backfills these from Frigate's
+HTTP API). `scripts/check-sync.py` runs the same comparison read-only: it
+reports which recognised plates Frigate has that your DB is missing. Stdlib
+only; writes nothing. Exits `0` in sync, `1` if gaps were found.
+
+It reads a *local* DB file, so first copy the live one down from the host
+running the container (the DB sits in its bind-mounted `data/` dir):
+
+```bash
+scp <user>@<host>:<path>/data/anpr.db ./data/anpr.db
+```
+
+Then compare it against Frigate:
+
+```bash
+# Local DB against a remote Frigate (DB_PATH defaults to ./data/anpr.db)
+FRIGATE_URL=http://<frigate-host>:5000 python3 scripts/check-sync.py
+
+# -v also lists events correctly skipped for being below MIN_SCORE
+DB_PATH=./data/anpr.db FRIGATE_URL=http://<frigate-host>:5000 \
+    python3 scripts/check-sync.py -v
+```
+
+Tunable via `MIN_SCORE` (default 0.8) and `RECONCILE_LOOKBACK_HOURS` (default 48).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
