@@ -77,6 +77,15 @@ FRIGATE_PUBLIC_URL = os.getenv("FRIGATE_PUBLIC_URL", FRIGATE_URL).rstrip("/")
 SNAPSHOTS_DIR = Path(DB_PATH).parent / "snapshots"
 SNAPSHOT_TIMEOUT = float(os.getenv("SNAPSHOT_TIMEOUT", "5"))
 
+# Reconciler: a safety net for the MQTT QoS-0 gap. Frigate publishes
+# `frigate/events` at QoS 0, so any event that arrives while we're
+# disconnected (deploy, crash, broker blip) is never redelivered — it's lost
+# from the MQTT stream but still sits in Frigate's own DB. We periodically pull
+# recent recognised-plate events from Frigate's HTTP API and backfill any the
+# live stream missed. Needs FRIGATE_URL; disabled when that's unset.
+RECONCILE_INTERVAL = float(os.getenv("RECONCILE_INTERVAL", "300"))
+RECONCILE_LOOKBACK = float(os.getenv("RECONCILE_LOOKBACK_HOURS", "48")) * 3600
+
 # Vehicle-registry providers (see backend/providers/README.md).
 PROVIDERS_DIR = Path(os.getenv("PROVIDERS_DIR", "/app/providers"))
 PROVIDERS_DEFAULT_DIR = Path(
@@ -616,11 +625,75 @@ def on_connect(client, userdata, flags, rc, properties=None):
         # still hold that subscription — drop it explicitly so we don't get
         # the old per-frame events alongside the new end-event stream.
         client.unsubscribe("frigate/tracked_object_update")
-        # QoS 1: broker queues events for us during downtime and redelivers
-        # on reconnect (works with our persistent session).
+        # QoS 1 on our side, but Frigate *publishes* events at QoS 0, so the
+        # broker does not queue them while we're disconnected — anything that
+        # arrives during downtime is lost from this stream. The HTTP reconciler
+        # (see start_reconciler) is the backstop that recovers those from
+        # Frigate's own DB.
         client.subscribe(TOPIC, qos=1)
     else:
         log.error("MQTT connection failed, rc=%s", rc)
+
+
+def record_sighting(
+    *,
+    raw_plate: str,
+    lpr_score: float,
+    camera: str | None,
+    name: str | None,
+    start_time: float | None,
+    event_id: str | None,
+    source: str = "mqtt",
+) -> bool:
+    """Persist one sighting, idempotently. Returns True only if a row was added.
+
+    The single insert path shared by the MQTT listener and the HTTP reconciler,
+    so both apply the same normalisation, score threshold and enrichment. Rows
+    are de-duplicated on ``frigate_event_id`` (UNIQUE index, migration #5): if
+    the reconciler re-sees an event MQTT already stored — or vice versa — the
+    insert is a no-op. A skipped row (already present, below ``MIN_SCORE``, or
+    an empty plate) returns False and does not re-trigger enrichment.
+    """
+    if lpr_score < MIN_SCORE:
+        return False
+    plate = normalize_plate(raw_plate)
+    if not plate:
+        return False
+    # Keep Frigate's own formatting (it already emits the canonical dashed
+    # plate, e.g. "GVF-57-G") so the dashboard can display that grouping
+    # verbatim. `plate` stays the separator-stripped key for everything else.
+    display_plate = raw_plate.strip().upper()
+    # Use Frigate's own start_time so the timeline reflects when the car
+    # actually passed, not when this (possibly delayed/back-filled) record
+    # happened to be written.
+    seen_at = (
+        datetime.fromtimestamp(float(start_time), tz=timezone.utc).isoformat()
+        if start_time is not None
+        else datetime.now(timezone.utc).isoformat()
+    )
+
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO sightings"
+            "(plate, seen_at, score, camera, name, frigate_event_id, raw_plate)"
+            " VALUES(?,?,?,?,?,?,?)"
+            " ON CONFLICT(frigate_event_id) DO NOTHING",
+            (plate, seen_at, lpr_score, camera, name, event_id, display_plate),
+        )
+        conn.commit()
+        inserted = cur.rowcount > 0
+    if not inserted:
+        return False
+
+    log.info("Sighting [%s]: %s (LPR score %.2f, cam %s, name %r, event %s)",
+             source, plate, lpr_score, camera, name, event_id)
+    # Vehicle lookup + snapshot fetch are slow network calls. Hand them to the
+    # background worker so the caller returns immediately — blocking here would
+    # starve the MQTT keepalive and eventually freeze ingestion. The sighting
+    # is already persisted; enrichment fills in make/model/snapshot a moment
+    # later.
+    _enrich_q.put((plate, event_id))
+    return True
 
 
 def on_message(client, userdata, msg):
@@ -647,46 +720,83 @@ def on_message(client, userdata, msg):
     if not isinstance(lpr, list) or len(lpr) < 2 or not lpr[0]:
         return
 
-    raw_plate, lpr_score = lpr[0], float(lpr[1] or 0)
-    if lpr_score < MIN_SCORE:
-        return
-
-    plate = normalize_plate(raw_plate)
-    # Keep Frigate's own formatting (it already emits the canonical dashed
-    # plate, e.g. "GVF-57-G") so the dashboard can display that grouping
-    # verbatim. `plate` stays the separator-stripped key for everything else.
-    display_plate = raw_plate.strip().upper()
-    event_id = after.get("id")
-    camera = after.get("camera")
-    # `sub_label` is Frigate's known-plate label, e.g. "Mieke Erwin" from
-    # the `lpr.known_plates` block in Frigate config.
-    name = after.get("sub_label")
-    # Use Frigate's own start_time so the timeline reflects when the car
-    # actually passed, not when this delayed end-event happened to arrive.
-    start_time = after.get("start_time")
-    seen_at = (
-        datetime.fromtimestamp(float(start_time), tz=timezone.utc).isoformat()
-        if start_time is not None
-        else datetime.now(timezone.utc).isoformat()
+    record_sighting(
+        raw_plate=lpr[0],
+        lpr_score=float(lpr[1] or 0),
+        camera=after.get("camera"),
+        # `sub_label` is Frigate's known-plate label, e.g. "Mieke Erwin" from
+        # the `lpr.known_plates` block in Frigate config.
+        name=after.get("sub_label"),
+        start_time=after.get("start_time"),
+        event_id=after.get("id"),
+        source="mqtt",
     )
 
-    with db() as conn:
-        conn.execute(
-            "INSERT INTO sightings"
-            "(plate, seen_at, score, camera, name, frigate_event_id, raw_plate)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (plate, seen_at, lpr_score, camera, name, event_id, display_plate),
-        )
-        conn.commit()
-        log.info("Sighting: %s (LPR score %.2f, cam %s, name %r)",
-                 plate, lpr_score, camera, name)
 
-    # Vehicle lookup + snapshot fetch are slow network calls. Hand them to the
-    # background worker so this callback returns immediately — blocking here
-    # would starve the MQTT keepalive and eventually freeze ingestion. The
-    # sighting is already persisted; enrichment fills in make/model/snapshot a
-    # moment later.
-    _enrich_q.put((plate, event_id))
+# ---------------------------------------------------------------------------
+# HTTP reconciler (backstop for events the MQTT QoS-0 stream dropped)
+# ---------------------------------------------------------------------------
+def reconcile_once() -> int:
+    """Backfill recent recognised-plate events from Frigate's HTTP API.
+
+    Pulls ``car`` events in the last ``RECONCILE_LOOKBACK`` seconds and feeds
+    each through ``record_sighting`` — which is idempotent on the Frigate event
+    id, so events MQTT already captured are skipped and only genuine gaps are
+    written. Returns the number of newly inserted sightings.
+    """
+    after = time.time() - RECONCILE_LOOKBACK
+    url = (
+        f"{FRIGATE_URL}/api/events"
+        f"?label=car&include_thumbnails=0&limit=200&after={after:.0f}"
+    )
+    with urllib.request.urlopen(url, timeout=SNAPSHOT_TIMEOUT) as resp:
+        events = json.loads(resp.read())
+
+    inserted = 0
+    for e in events:
+        data = e.get("data") or {}
+        plate = data.get("recognized_license_plate")
+        if not plate:
+            continue
+        if record_sighting(
+            raw_plate=plate,
+            lpr_score=float(data.get("recognized_license_plate_score") or 0),
+            camera=e.get("camera"),
+            name=e.get("sub_label"),
+            start_time=e.get("start_time"),
+            event_id=e.get("id"),
+            source="reconcile",
+        ):
+            inserted += 1
+    return inserted
+
+
+def _reconcile_worker() -> None:
+    """Run a reconcile sweep every ``RECONCILE_INTERVAL`` seconds, forever.
+
+    Exceptions (Frigate unreachable, malformed JSON) are logged and swallowed
+    so a transient API hiccup never kills the loop. The first sweep runs
+    immediately on start, so a deploy or crash that lost events is healed
+    within one cycle of coming back up.
+    """
+    while True:
+        try:
+            n = reconcile_once()
+            if n:
+                log.info("Reconcile: backfilled %d sighting(s) from Frigate API", n)
+        except Exception:  # noqa: BLE001 — never let one bad sweep kill the loop
+            log.exception("Reconcile sweep failed")
+        time.sleep(RECONCILE_INTERVAL)
+
+
+def start_reconciler() -> None:
+    if not FRIGATE_URL:
+        log.info("Reconciler disabled (FRIGATE_URL unset) — MQTT is the only "
+                 "ingestion path; events lost during downtime won't be recovered.")
+        return
+    threading.Thread(target=_reconcile_worker, name="reconcile", daemon=True).start()
+    log.info("Reconciler started (every %.0fs, %.0fh lookback) against %s",
+             RECONCILE_INTERVAL, RECONCILE_LOOKBACK / 3600, FRIGATE_URL)
 
 
 def start_mqtt():
@@ -702,6 +812,9 @@ def start_mqtt():
     # Stand up the enrichment worker before we start consuming, so the first
     # sighting's lookup has somewhere to go.
     start_enrichment_worker()
+    # The reconciler is independent of the broker — start it before the
+    # (possibly blocking) connect loop so backfill runs even if MQTT is down.
+    start_reconciler()
     while True:
         try:
             client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)

@@ -120,11 +120,44 @@ def _m4_sighting_raw_plate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE sightings ADD COLUMN raw_plate TEXT")
 
 
+def _m5_unique_frigate_event_id(conn: sqlite3.Connection) -> None:
+    """Make ``frigate_event_id`` unique so ingestion can be idempotent.
+
+    Two writers now insert sightings — the MQTT listener and the HTTP
+    reconciler that backfills events MQTT missed (Frigate publishes
+    ``frigate/events`` at QoS 0, so nothing is redelivered after a
+    disconnect). Both must converge on one row per Frigate event, which an
+    ``INSERT … ON CONFLICT(frigate_event_id) DO NOTHING`` gives us — but only
+    once a UNIQUE index exists as the conflict target.
+
+    Pre-existing duplicate event ids (from MQTT redelivery of the same end
+    event before this guard existed) would block the index, so collapse them
+    first, keeping the earliest row. NULL event ids (manual POST, OCR healing)
+    stay exempt: SQLite treats NULLs as distinct, so any number coexist.
+    """
+    conn.execute(
+        """
+        DELETE FROM sightings
+        WHERE frigate_event_id IS NOT NULL
+          AND id NOT IN (
+              SELECT MIN(id) FROM sightings
+              WHERE frigate_event_id IS NOT NULL
+              GROUP BY frigate_event_id
+          )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sightings_event_id "
+        "ON sightings(frigate_event_id)"
+    )
+
+
 MIGRATIONS: list[tuple[int, str, callable]] = [
     (1, "initial schema (sightings + vehicles + indexes)", _m1_initial_schema),
     (2, "extra RDW vehicle fields (price, recall, dimensions, …)", _m2_extra_vehicle_fields),
     (3, "sighting frigate event id", _m3_sighting_frigate_event_id),
     (4, "sighting raw (source-formatted) plate for display", _m4_sighting_raw_plate),
+    (5, "unique frigate_event_id (idempotent ingestion + reconciler)", _m5_unique_frigate_event_id),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 0
