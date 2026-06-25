@@ -1185,13 +1185,11 @@ const SIGHTINGS_PRESETS = [
   },
   {
     key: "week",
-    label: "This week",
-    range: (now) => {
-      const d = new Date(now);
-      d.setHours(0, 0, 0, 0);
-      d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // back to Monday
-      return [d.getTime(), now];
-    },
+    // Rolling 7-day window ending now — always a full week of time, regardless
+    // of the weekday (unlike a Monday→now calendar week, which is short early
+    // in the week).
+    label: "Last 7 days",
+    range: (now) => [now - 7 * 24 * 60 * 60_000, now],
   },
   {
     key: "month",
@@ -1224,7 +1222,7 @@ function sightingsBaseRange() {
 let sightingsBase = null;
 
 // Shared time filter for the Passages views. null = viewing the full base
-// window (a preset, or "this week" by default). When the user narrows the
+// window (a preset, or "last 7 days" by default). When the user narrows the
 // timeline to a sub-window, this holds {from, to} in epoch-ms and BOTH sub-views
 // honor it — switching to the List tab then shows exactly the events that were
 // visible in the filtered timeline. Lives at module scope so it survives the
@@ -1376,7 +1374,7 @@ async function renderSightingsList() {
   listEl.appendChild(h("div.status", {}, "Loading…"));
 
   // Honor the active window: a zoom filter takes precedence, else the base
-  // window (a chosen preset, or "this week" by default — both bound the list).
+  // window (a chosen preset, or "last 7 days" by default — both bound the list).
   const [bFrom, bTo] = sightingsBaseRange();
   const win = sightingsFilter || { from: bFrom, to: bTo };
   const query =
@@ -1442,8 +1440,8 @@ async function renderSightingsList() {
   }
 }
 
-// All-vehicles timeline: every passage in the current week on one combined
-// axis. Reuses mountTimeline with a week window, pan enabled, a plate-aware
+// All-vehicles timeline: every passage in the last 7 days on one combined
+// axis. Reuses mountTimeline with a 7-day window, pan enabled, a plate-aware
 // tooltip, and click-to-navigate to the plate detail page.
 async function renderSightingsTimeline() {
   const wrap = document.getElementById("sightings-timeline");
@@ -1451,7 +1449,7 @@ async function renderSightingsTimeline() {
 
   wrap.appendChild(h("div.status", {}, "Loading…"));
 
-  // The base window (active preset, or "this week" by default) sets where the
+  // The base window (active preset, or "last 7 days" by default) sets where the
   // timeline opens; the data itself is loaded in full so panning/zooming always
   // has points, not just the base window.
   const [start, end] = sightingsBaseRange();
@@ -1486,7 +1484,7 @@ async function renderSightingsTimeline() {
 
   // Fired on every view change (pan/zoom/brush/reset). When the view spans the
   // full base window we treat it as "no zoom filter": clear the sub-filter so
-  // the List shows the whole base. The label reads "this week" for the default
+  // the List shows the whole base. The label reads "last 7 days" for the default
   // base; for a preset the pill already names it, so we just count.
   let presetsReflectFilter = sightingsFilter != null;
   function onTimelineView(viewStart, viewEnd) {
@@ -1496,7 +1494,7 @@ async function renderSightingsTimeline() {
       sightingsFilter = null;
       metaEl.textContent = sightingsBase
         ? `${baseCount} passage${plural(baseCount)}`
-        : `${baseCount} passage${plural(baseCount)} this week`;
+        : `${baseCount} passage${plural(baseCount)} in the last 7 days`;
     } else {
       sightingsFilter = { from: viewStart, to: viewEnd };
       const n = countInWindow(viewStart, viewEnd);
@@ -1528,7 +1526,7 @@ async function renderSightingsTimeline() {
     enablePan: true,
     onViewChange: onTimelineView,
     // The timeline's Reset button returns the whole page to the default window
-    // (clears any zoom and any chosen preset → back to "this week").
+    // (clears any zoom and any chosen preset → back to "last 7 days").
     onReset: clearSightingsFilter,
     formatTooltip: (pt) => {
       const r = pt.row;
