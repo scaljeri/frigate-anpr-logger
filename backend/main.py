@@ -145,6 +145,7 @@ _PLATE_CONFUSABLES = {
     "I": "1", "1": "I",
     "G": "5", "5": "G",
     "O": "0", "0": "O",
+    "Z": "7", "7": "Z",  # seven-segment / OCR: digit 7 vs letter Z
 }
 
 
@@ -159,6 +160,52 @@ def heal_plate(plate: str) -> str | None:
         return None
     i = positions[0]
     return plate[:i] + _PLATE_CONFUSABLES[plate[i]] + plate[i + 1:]
+
+
+def _confusable_variants(plate: str) -> list[str]:
+    """Every plate reachable by swapping exactly one OCR-confusable character.
+
+    Unlike ``heal_plate`` (which refuses when 2+ confusables are present), this
+    yields one variant per confusable position — so a plate riddled with
+    confusables (e.g. ``GN3757`` → ``G``, ``5``, two ``7``s) still produces
+    candidates. De-duplicated; never includes ``plate`` itself.
+    """
+    seen = set()
+    for i, c in enumerate(plate):
+        if c in _PLATE_CONFUSABLES:
+            variant = plate[:i] + _PLATE_CONFUSABLES[c] + plate[i + 1:]
+            if variant != plate:
+                seen.add(variant)
+    return list(seen)
+
+
+def find_confusable_match(conn, plate: str) -> str | None:
+    """Find a single, registry-confirmed plate that ``plate`` is a misread of.
+
+    Looks for cached ``vehicles`` rows reachable by one confusable swap that
+    carry real provider data (``raw_json IS NOT NULL`` — negative-cache rows
+    only set plate/provider/fetched_at). Returns the match when there is exactly
+    one; ``None`` when there are none or — to avoid guessing between two real
+    plates — when there are several.
+    """
+    variants = _confusable_variants(plate)
+    if not variants:
+        return None
+    placeholders = ",".join("?" * len(variants))
+    rows = conn.execute(
+        f"SELECT plate FROM vehicles "
+        f"WHERE plate IN ({placeholders}) AND raw_json IS NOT NULL",
+        variants,
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0]["plate"]
+    if len(rows) > 1:
+        log.info(
+            "Ambiguous confusable match for %s: %s — refusing to merge",
+            plate,
+            [r["plate"] for r in rows],
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +522,17 @@ def ensure_vehicle(conn, plate: str, force: bool = False, provider: dict | None 
         if healed:
             log.info("Healing %s → %s, retrying %r", plate, healed, provider["name"])
             raw = fetch_vehicle(healed, provider)
+    if raw is None:
+        # The registry doesn't know this plate. Before negative-caching it,
+        # check whether it's a one-confusable misread of a plate we *already*
+        # have confirmed registry data for — if so, this sighting belongs to
+        # that vehicle. No vehicles row for ``plate`` exists yet here, so the
+        # DELETE inside merge_plate_into is a harmless no-op.
+        match = find_confusable_match(conn, plate)
+        if match:
+            log.info("Merging misread %s into known plate %s", plate, match)
+            merge_plate_into(conn, plate, match)
+            return
     now = datetime.now(timezone.utc).isoformat()
     if raw is None:
         log.info("No data from provider %r for %s; caching empty.", provider["name"], plate)
@@ -571,6 +629,26 @@ def migrate_snapshot(src_plate: str, dst_plate: str) -> None:
             src.replace(dst)  # atomic rename within the same directory
     except OSError as e:
         log.warning("Snapshot move %s -> %s failed: %s", src, dst, e)
+
+
+def merge_plate_into(conn, src: str, dst: str) -> None:
+    """Move every sighting from ``src`` to ``dst`` and let the snapshot follow.
+
+    The physical merge shared by the manual ``/plates/{plate}/rename`` endpoint
+    and the automatic confusable-merge in ``ensure_vehicle``: a single UPDATE
+    repoints the sightings (if ``dst`` already has some, they now share one
+    timeline), the source's orphaned ``vehicles`` row is dropped, and the cached
+    Frigate photo migrates (the destination's image wins on a merge). Move +
+    cleanup run in one transaction so a crash can't leave a half-merged plate.
+
+    Does *not* (re-)fetch registry data for ``dst`` — callers decide whether the
+    destination needs a lookup (the manual path forces one; the auto path only
+    ever merges into an already-confirmed plate).
+    """
+    conn.execute("UPDATE sightings SET plate = ? WHERE plate = ?", (dst, src))
+    conn.execute("DELETE FROM vehicles WHERE plate = ?", (src,))
+    conn.commit()
+    migrate_snapshot(src, dst)
 
 
 # ---------------------------------------------------------------------------
@@ -1276,12 +1354,8 @@ def rename_plate(plate: str, body: PlateRename):
             "SELECT 1 FROM sightings WHERE plate = ? LIMIT 1", (dst,)
         ).fetchone() is not None
 
-        conn.execute("UPDATE sightings SET plate = ? WHERE plate = ?", (dst, src))
-        conn.execute("DELETE FROM vehicles WHERE plate = ?", (src,))
-        conn.commit()
-
-        # Snapshot follows the plate (no-op when the target already had one).
-        migrate_snapshot(src, dst)
+        # Move sightings, drop the orphaned source row, migrate the snapshot.
+        merge_plate_into(conn, src, dst)
 
         # One authoritative registry lookup for the destination, replacing any
         # stale/empty cached row.
