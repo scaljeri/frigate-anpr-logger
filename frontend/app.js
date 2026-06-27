@@ -1342,28 +1342,31 @@ function clearSightingsFilter() {
 async function renderSightings(subview = "list") {
   renderTemplate("tpl-sightings");
 
-  // Wire the List | Timeline sub-tabs and reflect the active one. Each toggle
-  // just sets the hash; route() re-renders with the chosen sub-view.
+  // Wire the List | Timeline | Chart sub-tabs and reflect the active one. Each
+  // toggle just sets the hash; route() re-renders with the chosen sub-view.
   for (const btn of document.querySelectorAll("#main [data-subview]")) {
     const view = btn.dataset.subview;
     btn.classList.toggle("active", view === subview);
     btn.addEventListener("click", () => {
       location.hash =
-        view === "timeline" ? "#/sightings?view=timeline" : "#/sightings";
+        view === "list" ? "#/sightings" : `#/sightings?view=${view}`;
     });
   }
 
-  // Preset buttons + the active-range chip are shared by both sub-views (they
+  // Preset buttons + the active-range chip are shared by all sub-views (they
   // carry the range across a sub-tab switch).
   renderSightingsPresets();
   renderSightingsFilterChip();
 
   const listEl = document.getElementById("sightings-list");
   const tlEl = document.getElementById("sightings-timeline");
-  listEl.hidden = subview === "timeline";
+  const chartEl = document.getElementById("sightings-chart");
+  listEl.hidden = subview !== "list";
   tlEl.hidden = subview !== "timeline";
+  chartEl.hidden = subview !== "chart";
 
   if (subview === "timeline") return renderSightingsTimeline();
+  if (subview === "chart") return renderSightingsChart();
   return renderSightingsList();
 }
 
@@ -1443,6 +1446,39 @@ async function renderSightingsList() {
 // All-vehicles timeline: every passage in the last 7 days on one combined
 // axis. Reuses mountTimeline with a 7-day window, pan enabled, a plate-aware
 // tooltip, and click-to-navigate to the plate detail page.
+// Shared bridge for the Timeline and Chart sub-views: on every view change it
+// updates the meta count and the page-level zoom filter (sightingsFilter), and
+// re-highlights presets when the custom-range state flips. Both views feed it
+// the same parsed tsList, so they stay in lockstep on the shared window state.
+function makeSightingsWindowBridge(metaEl, start, end, tsList) {
+  const countInWindow = (a, b) =>
+    tsList.reduce((n, t) => n + (t >= a && t <= b ? 1 : 0), 0);
+  const baseCount = countInWindow(start, end);
+  const plural = (n) => (n === 1 ? "" : "s");
+  let presetsReflectFilter = sightingsFilter != null;
+  function onView(viewStart, viewEnd) {
+    const isFull =
+      Math.abs(viewStart - start) < 1000 && Math.abs(viewEnd - end) < 1000;
+    if (isFull) {
+      sightingsFilter = null;
+      metaEl.textContent = sightingsBase
+        ? `${baseCount} passage${plural(baseCount)}`
+        : `${baseCount} passage${plural(baseCount)} in the last 7 days`;
+    } else {
+      sightingsFilter = { from: viewStart, to: viewEnd };
+      const n = countInWindow(viewStart, viewEnd);
+      metaEl.textContent = `${n} passage${plural(n)}`;
+    }
+    renderSightingsFilterChip();
+    const hasFilter = sightingsFilter != null;
+    if (hasFilter !== presetsReflectFilter) {
+      presetsReflectFilter = hasFilter;
+      renderSightingsPresets();
+    }
+  }
+  return { onView, countInWindow };
+}
+
 async function renderSightingsTimeline() {
   const wrap = document.getElementById("sightings-timeline");
   const metaEl = document.getElementById("sightings-meta");
@@ -1473,42 +1509,16 @@ async function renderSightingsTimeline() {
   clear(wrap);
 
   // Pre-parse timestamps once so the live count (recomputed as the user
-  // pans/zooms) stays cheap.
+  // pans/zooms) stays cheap; the shared bridge keeps meta + filter in sync.
   const tsList = sightings
     .map((s) => Date.parse(s.seen_at))
     .filter(Number.isFinite);
-  const countInWindow = (a, b) =>
-    tsList.reduce((n, t) => n + (t >= a && t <= b ? 1 : 0), 0);
-  const baseCount = countInWindow(start, end);
-  const plural = (n) => (n === 1 ? "" : "s");
-
-  // Fired on every view change (pan/zoom/brush/reset). When the view spans the
-  // full base window we treat it as "no zoom filter": clear the sub-filter so
-  // the List shows the whole base. The label reads "last 7 days" for the default
-  // base; for a preset the pill already names it, so we just count.
-  let presetsReflectFilter = sightingsFilter != null;
-  function onTimelineView(viewStart, viewEnd) {
-    const isFull =
-      Math.abs(viewStart - start) < 1000 && Math.abs(viewEnd - end) < 1000;
-    if (isFull) {
-      sightingsFilter = null;
-      metaEl.textContent = sightingsBase
-        ? `${baseCount} passage${plural(baseCount)}`
-        : `${baseCount} passage${plural(baseCount)} in the last 7 days`;
-    } else {
-      sightingsFilter = { from: viewStart, to: viewEnd };
-      const n = countInWindow(viewStart, viewEnd);
-      metaEl.textContent = `${n} passage${plural(n)}`;
-    }
-    renderSightingsFilterChip();
-    // Re-highlight presets only when the custom-range state flips: a custom
-    // zoom de-selects every preset; returning to the full base re-selects it.
-    const hasFilter = sightingsFilter != null;
-    if (hasFilter !== presetsReflectFilter) {
-      presetsReflectFilter = hasFilter;
-      renderSightingsPresets();
-    }
-  }
+  const { onView: onTimelineView } = makeSightingsWindowBridge(
+    metaEl,
+    start,
+    end,
+    tsList,
+  );
 
   // Viewing the full base window → start the step stack empty too (don't carry
   // stale steps from a prior session).
@@ -1543,6 +1553,60 @@ async function renderSightingsTimeline() {
     },
     onClick: (r) => {
       location.hash = "#/plate/" + encodeURIComponent(r.plate);
+    },
+  });
+}
+
+async function renderSightingsChart() {
+  const wrap = document.getElementById("sightings-chart");
+  const metaEl = document.getElementById("sightings-meta");
+
+  wrap.appendChild(h("div.status", {}, "Loading…"));
+
+  // Same base window + full data load as the timeline (the totals histogram is
+  // computed client-side from the same rows), so the two views share one zoom.
+  const [start, end] = sightingsBaseRange();
+  const LIMIT = 5000;
+  let sightings;
+  try {
+    sightings = await apiGet(`/sightings?limit=${LIMIT}`);
+  } catch (e) {
+    clear(wrap);
+    wrap.appendChild(
+      h("div.status.error", {}, `Failed to fetch /sightings: ${e.message}`),
+    );
+    return;
+  }
+
+  clear(wrap);
+
+  const tsList = sightings
+    .map((s) => Date.parse(s.seen_at))
+    .filter(Number.isFinite);
+  const { onView: onChartView } = makeSightingsWindowBridge(
+    metaEl,
+    start,
+    end,
+    tsList,
+  );
+
+  if (!sightingsFilter) sightingsTimelineHistory = [];
+
+  mountTimeline(wrap, sightings, {
+    mode: "bars",
+    initialStart: start,
+    initialEnd: end,
+    initialView: sightingsFilter ? [sightingsFilter.from, sightingsFilter.to] : null,
+    history: sightingsTimelineHistory,
+    enablePan: true,
+    onViewChange: onChartView,
+    onReset: clearSightingsFilter,
+    // Click a bar → jump to the List filtered to that bucket's period. end is
+    // exclusive (the next bucket's start), so trim 1ms to avoid catching the
+    // adjacent bucket's boundary sighting.
+    onBarClick: (bucketStart, bucketEnd) => {
+      sightingsFilter = { from: bucketStart, to: bucketEnd - 1 };
+      location.hash = "#/sightings";
     },
   });
 }
@@ -1671,6 +1735,25 @@ function pickInterval(spanMs, width) {
   return TICK_STEPS[TICK_STEPS.length - 1];
 }
 
+// Histogram bucket sizes (bars mode). Distinct from tick intervals: ticks are
+// tuned for ~90px label spacing, but bars want a fixed calendar granularity —
+// hours when zoomed into a day, jumping to days (then weeks/months) as you zoom
+// out. We pick the finest size that keeps the bar count under BUCKET_MAX_BARS,
+// so e.g. a one-day view shows 24 hourly bars and the default week view shows
+// daily bars. Reuses snapTick/nextTick for local-TZ-correct bucket edges.
+const BUCKET_STEPS = [
+  { ms: 60 * 60_000, kind: "hour", step: 1 },
+  { ms: 24 * 60 * 60_000, kind: "day", step: 1 },
+  { ms: 7 * 24 * 60 * 60_000, kind: "week", step: 1 },
+  { ms: 30 * 24 * 60 * 60_000, kind: "month", step: 1 },
+  { ms: 365 * 24 * 60 * 60_000, kind: "year", step: 1 },
+];
+const BUCKET_MAX_BARS = 100;
+function pickBucket(spanMs) {
+  for (const b of BUCKET_STEPS) if (spanMs / b.ms <= BUCKET_MAX_BARS) return b;
+  return BUCKET_STEPS[BUCKET_STEPS.length - 1];
+}
+
 const _fmtTickMinute = new Intl.DateTimeFormat(undefined, {
   hour: "2-digit",
   minute: "2-digit",
@@ -1731,6 +1814,10 @@ function mountTimeline(container, passages, opts = {}) {
     }))
     .filter((d) => Number.isFinite(d.ts))
     .sort((a, b) => a.ts - b.ts);
+
+  // "bars" renders a totals histogram (adaptive hour/day buckets) instead of the
+  // per-sighting "spikes"; all zoom/pan/brush/undo interaction is shared.
+  const isBars = opts.mode === "bars";
 
   // A caller-supplied window (e.g. the all-vehicles week view) lets us render an
   // axis even with no points; without one, an empty dataset has nothing to show.
@@ -1838,6 +1925,41 @@ function mountTimeline(container, passages, opts = {}) {
   }
   function tsToPx(ts) {
     return ((ts - viewStart) / (viewEnd - viewStart)) * width;
+  }
+
+  // ---- histogram buckets (bars mode) ----
+  // Recomputed each render from the current [viewStart, viewEnd]. Kept in the
+  // closure so hover/click can map a pixel back to its bucket.
+  let buckets = [];
+  let bucketInterval = null;
+
+  function bucketize() {
+    buckets = [];
+    if (!isBars) return;
+    bucketInterval = pickBucket(viewEnd - viewStart);
+    let t = snapTick(viewStart, bucketInterval);
+    let guard = 0;
+    while (t <= viewEnd && guard < 2000) {
+      const next = nextTick(t, bucketInterval);
+      buckets.push({ start: t, end: next, count: 0 });
+      t = next;
+      guard += 1;
+    }
+    if (!buckets.length) return;
+    // data is sorted ascending and buckets are contiguous → single pass.
+    let bi = 0;
+    for (const d of data) {
+      if (d.ts < buckets[0].start) continue;
+      while (bi < buckets.length && d.ts >= buckets[bi].end) bi += 1;
+      if (bi >= buckets.length) break;
+      if (d.ts >= buckets[bi].start) buckets[bi].count += 1;
+    }
+  }
+
+  function findBucketAtPx(x) {
+    const ts = pxToTs(x);
+    for (const b of buckets) if (ts >= b.start && ts < b.end) return b;
+    return null;
   }
 
   function clampView(start, end) {
@@ -2012,24 +2134,48 @@ function mountTimeline(container, passages, opts = {}) {
       }),
     );
 
-    // Spikes.
-    for (const d of data) {
-      if (d.ts < viewStart || d.ts > viewEnd) continue;
-      const x = tsToPx(d.ts);
-      const norm =
-        d.score != null && d.score >= 0 && d.score <= 1
-          ? 0.55 + 0.45 * d.score
-          : 0.75;
-      const h = Math.max(20, spikeArea * norm);
-      svg.appendChild(
-        svgEl("line", {
-          class: "tl-spike",
-          x1: x,
-          y1: baseY,
-          x2: x,
-          y2: baseY - h,
-        }),
-      );
+    if (isBars) {
+      // Totals histogram: one bar per hour/day bucket, height ∝ count.
+      bucketize();
+      const maxCount = buckets.reduce((m, b) => Math.max(m, b.count), 0) || 1;
+      for (const b of buckets) {
+        if (b.count <= 0) continue;
+        const x0 = tsToPx(b.start);
+        const x1 = tsToPx(b.end);
+        if (x1 < 0 || x0 > width) continue;
+        const gap = Math.min(3, (x1 - x0) * 0.2);
+        const bw = Math.max(1, x1 - x0 - gap);
+        const bh = Math.max(2, (b.count / maxCount) * spikeArea);
+        svg.appendChild(
+          svgEl("rect", {
+            class: "tl-bar",
+            x: x0 + gap / 2,
+            y: baseY - bh,
+            width: bw,
+            height: bh,
+          }),
+        );
+      }
+    } else {
+      // Spikes.
+      for (const d of data) {
+        if (d.ts < viewStart || d.ts > viewEnd) continue;
+        const x = tsToPx(d.ts);
+        const norm =
+          d.score != null && d.score >= 0 && d.score <= 1
+            ? 0.55 + 0.45 * d.score
+            : 0.75;
+        const h = Math.max(20, spikeArea * norm);
+        svg.appendChild(
+          svgEl("line", {
+            class: "tl-spike",
+            x1: x,
+            y1: baseY,
+            x2: x,
+            y2: baseY - h,
+          }),
+        );
+      }
     }
 
     svgWrap.appendChild(svg);
@@ -2233,14 +2379,23 @@ function mountTimeline(container, passages, opts = {}) {
       return;
     }
     if (brushing) {
-      // A press that never moved past the brush threshold is a click: navigate
-      // to the nearest point instead of zooming.
+      // A press that never moved past the brush threshold is a click: in spikes
+      // mode navigate to the nearest point; in bars mode jump to the clicked
+      // bucket's period. Otherwise the drag is a brush-zoom.
       const dx = Math.abs(brushCurPx - brushStartPx);
-      if (dx < BRUSH_MIN_PX && opts.onClick) {
-        const nearest = findNearestPx(brushStartPx);
-        clearBrush();
-        if (nearest) opts.onClick(nearest.row);
-        return;
+      if (dx < BRUSH_MIN_PX) {
+        if (isBars && opts.onBarClick) {
+          const b = findBucketAtPx(brushStartPx);
+          clearBrush();
+          if (b && b.count > 0) opts.onBarClick(b.start, b.end);
+          return;
+        }
+        if (opts.onClick) {
+          const nearest = findNearestPx(brushStartPx);
+          clearBrush();
+          if (nearest) opts.onClick(nearest.row);
+          return;
+        }
       }
       commitBrush();
     }
@@ -2279,6 +2434,23 @@ function mountTimeline(container, passages, opts = {}) {
     const x = clientX - rect.left;
     if (x < 0 || x > width) {
       tooltip.style.display = "none";
+      return;
+    }
+    if (isBars) {
+      const b = findBucketAtPx(x);
+      if (!b || b.count <= 0) {
+        tooltip.style.display = "none";
+        return;
+      }
+      const dayish =
+        bucketInterval && bucketInterval.kind !== "hour"
+          ? formatTick(b.start, bucketInterval)
+          : fmtDateTime.format(new Date(b.start));
+      const noun = b.count === 1 ? "sighting" : "sightings";
+      tooltip.textContent = `${b.count} ${noun}  ·  ${dayish}`;
+      tooltip.style.left = `${(tsToPx(b.start) + tsToPx(b.end)) / 2}px`;
+      tooltip.style.top = `${(svgWrap.clientHeight || 140) - 32 - 6}px`;
+      tooltip.style.display = "block";
       return;
     }
     const tolerancePx = 14;
@@ -2427,7 +2599,10 @@ function route() {
   } else if (hash === "#/sightings" || hash.startsWith("#/sightings?")) {
     setActiveTab("sightings");
     const q = new URLSearchParams(hash.split("?")[1] || "");
-    renderSightings(q.get("view") === "timeline" ? "timeline" : "list");
+    const view = q.get("view");
+    renderSightings(
+      view === "timeline" || view === "chart" ? view : "list",
+    );
   } else if (hash.startsWith("#/plate/")) {
     setActiveTab("plates");
     const plate = decodeURIComponent(hash.slice("#/plate/".length));

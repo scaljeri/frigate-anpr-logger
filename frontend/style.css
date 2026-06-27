@@ -797,6 +797,18 @@ button {
   stroke-linecap: round;
 }
 
+.timeline-svg-wrap .tl-bar {
+  fill: var(--accent);
+  fill-opacity: 0.55;
+  stroke: var(--accent);
+  stroke-width: 1;
+  rx: 1.5;
+}
+
+.timeline-svg-wrap:hover .tl-bar {
+  fill-opacity: 0.7;
+}
+
 .timeline-svg-wrap .tl-brush {
   fill: var(--accent);
   fill-opacity: 0.16;
