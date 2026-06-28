@@ -843,7 +843,7 @@ button {
 .timeline-tooltip::after {
   content: "";
   position: absolute;
-  left: 50%;
+  left: var(--tip-arrow, 50%);
   bottom: -4px;
   width: 6px;
   height: 6px;

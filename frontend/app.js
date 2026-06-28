@@ -2465,6 +2465,23 @@ function mountTimeline(container, passages, opts = {}) {
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
 
+  // Place the tooltip horizontally centered on targetPx, but clamp the box
+  // inside the plot so it never spills past the edges; the arrow is nudged so
+  // it keeps pointing at the real target even when the box is clamped.
+  function positionTooltip(targetPx) {
+    tooltip.style.top = `${(svgWrap.clientHeight || 140) - 32 - 6}px`;
+    tooltip.style.display = "block";
+    const pad = 4;
+    const halfW = tooltip.offsetWidth / 2;
+    let center = targetPx;
+    if (halfW * 2 + pad * 2 < width) {
+      center = Math.max(halfW + pad, Math.min(width - halfW - pad, targetPx));
+    }
+    tooltip.style.left = `${center}px`;
+    const arrow = Math.max(8, Math.min(2 * halfW - 8, halfW + (targetPx - center)));
+    tooltip.style.setProperty("--tip-arrow", `${arrow}px`);
+  }
+
   function showTooltipAt(clientX) {
     const rect = svgWrap.getBoundingClientRect();
     const x = clientX - rect.left;
@@ -2490,9 +2507,7 @@ function mountTimeline(container, passages, opts = {}) {
       }
       const noun = b.count === 1 ? "sighting" : "sightings";
       tooltip.textContent = `${b.count} ${noun}  ·  ${dayish}`;
-      tooltip.style.left = `${(tsToPx(b.start) + tsToPx(b.end)) / 2}px`;
-      tooltip.style.top = `${(svgWrap.clientHeight || 140) - 32 - 6}px`;
-      tooltip.style.display = "block";
+      positionTooltip((tsToPx(b.start) + tsToPx(b.end)) / 2);
       return;
     }
     const tolerancePx = 14;
@@ -2524,9 +2539,7 @@ function mountTimeline(container, passages, opts = {}) {
       if (nearest.camera) parts.push(nearest.camera);
       tooltip.textContent = parts.join("  ·  ");
     }
-    tooltip.style.left = `${tsToPx(nearest.ts)}px`;
-    tooltip.style.top = `${(svgWrap.clientHeight || 140) - 32 - 6}px`;
-    tooltip.style.display = "block";
+    positionTooltip(tsToPx(nearest.ts));
   }
 
   // Touch: single-finger paints a brush (same as mouse drag), two-finger pinch zooms.
