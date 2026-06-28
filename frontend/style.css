@@ -791,6 +791,12 @@ button {
   font-family: var(--font-mono);
 }
 
+.timeline-svg-wrap .tl-ylabel {
+  fill: var(--text-dim);
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+
 .timeline-svg-wrap .tl-spike {
   stroke: var(--accent);
   stroke-width: 2;

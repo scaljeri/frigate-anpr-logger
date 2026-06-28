@@ -1754,6 +1754,16 @@ function pickBucket(spanMs) {
   return BUCKET_STEPS[BUCKET_STEPS.length - 1];
 }
 
+// Round a rough interval up to a 1/2/5×10ⁿ "nice" number for the count axis.
+// Counts are integers, so the step is clamped to ≥1.
+function niceAxisStep(rough) {
+  if (!(rough > 0)) return 1;
+  const pow = Math.pow(10, Math.floor(Math.log10(rough)));
+  const f = rough / pow;
+  const nf = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
+  return Math.max(1, nf * pow);
+}
+
 const _fmtTickMinute = new Intl.DateTimeFormat(undefined, {
   hour: "2-digit",
   minute: "2-digit",
@@ -2140,7 +2150,23 @@ function mountTimeline(container, passages, opts = {}) {
     if (isBars) {
       // Totals histogram: one bar per hour/day bucket, height ∝ count.
       bucketize();
-      const maxCount = buckets.reduce((m, b) => Math.max(m, b.count), 0) || 1;
+      const rawMax = buckets.reduce((m, b) => Math.max(m, b.count), 0);
+      // Round the value-axis ceiling up to a nice number so y-ticks land on
+      // round counts and bars scale against that ceiling (not the raw max).
+      const yStep = niceAxisStep((rawMax || 1) / 4);
+      const yMax = Math.max(yStep, Math.ceil((rawMax || 1) / yStep) * yStep);
+
+      // Y-axis: faint horizontal gridlines across the plot, count labels at the
+      // left. Gridlines go behind the bars; labels are drawn on top afterwards.
+      const yTicks = [];
+      for (let c = 0; c <= yMax + 1e-9; c += yStep) {
+        const y = baseY - (c / yMax) * spikeArea;
+        yTicks.push({ c, y });
+        svg.appendChild(
+          svgEl("line", { class: "tl-guide", x1: 0, y1: y, x2: width, y2: y }),
+        );
+      }
+
       for (const b of buckets) {
         if (b.count <= 0) continue;
         const x0 = tsToPx(b.start);
@@ -2148,7 +2174,7 @@ function mountTimeline(container, passages, opts = {}) {
         if (x1 < 0 || x0 > width) continue;
         const gap = Math.min(3, (x1 - x0) * 0.2);
         const bw = Math.max(1, x1 - x0 - gap);
-        const bh = Math.max(2, (b.count / maxCount) * spikeArea);
+        const bh = Math.max(2, (b.count / yMax) * spikeArea);
         svg.appendChild(
           svgEl("rect", {
             class: "tl-bar",
@@ -2158,6 +2184,13 @@ function mountTimeline(container, passages, opts = {}) {
             height: bh,
           }),
         );
+      }
+
+      // Count labels on top of the bars so they stay legible.
+      for (const { c, y } of yTicks) {
+        const label = svgEl("text", { class: "tl-ylabel", x: 3, y: y - 2 });
+        label.textContent = String(c);
+        svg.appendChild(label);
       }
     } else {
       // Spikes.
