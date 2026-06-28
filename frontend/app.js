@@ -1764,6 +1764,9 @@ const _fmtTickDay = new Intl.DateTimeFormat(undefined, {
   day: "2-digit",
   month: "short",
 });
+const _fmtTickWeekday = new Intl.DateTimeFormat(undefined, {
+  weekday: "short",
+});
 const _fmtTickMonth = new Intl.DateTimeFormat(undefined, {
   month: "short",
   year: "numeric",
@@ -2442,10 +2445,16 @@ function mountTimeline(container, passages, opts = {}) {
         tooltip.style.display = "none";
         return;
       }
-      const dayish =
+      let dayish =
         bucketInterval && bucketInterval.kind !== "hour"
           ? formatTick(b.start, bucketInterval)
           : fmtDateTime.format(new Date(b.start));
+      // Prepend the weekday (Mon, Tue, …) when the bucket is a single calendar
+      // day or an hour within one — for week/month/year buckets it's meaningless.
+      const kind = bucketInterval ? bucketInterval.kind : "hour";
+      if (kind === "hour" || kind === "day") {
+        dayish = `${_fmtTickWeekday.format(new Date(b.start))} ${dayish}`;
+      }
       const noun = b.count === 1 ? "sighting" : "sightings";
       tooltip.textContent = `${b.count} ${noun}  ·  ${dayish}`;
       tooltip.style.left = `${(tsToPx(b.start) + tsToPx(b.end)) / 2}px`;
